@@ -1,0 +1,14 @@
+{
+  "name": "aqua-mouse-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Logitech G Pro side-button → Aqua Voice + post-transcription Enter",
+  "scripts": {
+    "start": "node src/mouse-bridge.mjs",
+    "test": "node --test src/state-machine.test.mjs src/settle.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

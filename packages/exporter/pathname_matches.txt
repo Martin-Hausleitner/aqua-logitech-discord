@@ -1,0 +1,36 @@
+);if(!i.includes(c))return Reflect.apply(e,t,n);if(!o?.url?.pathname||"string"!=typeof o.url.pathname)return Reflect.apply(e,t,n
+);const _=o.url.pathname.split("/"),E=_.length>0?_[_.length-1]:"",S=[];for(const[e,t
+L(e,t??window.location.href)}catch(e){return null}const r=n.pathname.match(/\.([0-9a-z]+)(?:$)/i);return r?.[1]??null}const I={}
+sion();this.pause()}setInitialState(){const e=`${s.location.pathname}${s.location.hash}${s.location.search}`,t=`${s.location.ori
+_instance=e,this.dt=(null==r||null==(t=r.location)?void 0:t.pathname)||""}get isEnabled(){return"history_change"===this._instanc
+)}}ft(e){try{var t,n=null==r||null==(t=r.location)?void 0:t.pathname;if(!n)return;n!==this.dt&&this.isEnabled&&this._instance.ca
+iredHash?e.hash=o.desiredHash:n?n.replaceState(n.state,"",e.pathname+e.search):e.hash="")):((i=JSON.parse(t.getItem(Kn)||"{}")).
+$current_url=r;var s=rn(r);i.$host=null==s?void 0:s.host,i.$pathname=null==s?void 0:s.pathname;var o=Qr(r);Pe(i,o)}if(n){var a=e
+on(null==u?void 0:u.href,o,$r),$host:null==u?void 0:u.host,$pathname:null==u?void 0:u.pathname,$raw_user_agent:S.length>1e3?S.su
+ance=e}doPageView(e,t){var n,i=this.Gt(e,t);return this.Vt={pathname:null!==(n=null==r?void 0:r.location.pathname)&&void 0!==n?n
+ntent:u,$prev_pageview_max_content_percentage:S})}}return n.pathname&&(r.$prev_pageview_pathname=n.pathname),n.timestamp&&(r.$pr
+eturn t?"r"in t?ii(t):{$referring_domain:t.referringDomain,$pathname:t.initialPathName,utm_source:t.utm_source,utm_campaign:t.ut
+string"==typeof t){try{const e=function(e){const{hostname:t,pathname:n,port:r,username:i,password:s,search:o,protocol:a,hash:c,h
+ol:a,hostname:t&&"["===t[0]?t.slice(1,-1):t,hash:c,search:o,pathname:n,path:`${n||""}${o||""}`,href:l,origin:u,host:d};return""!
+deURIComponent(i)}:${decodeURIComponent(s)}`),_}(t);s=e,r=e.pathname||"/"}catch(n){a=!0,e.verbose("Unable to parse URL provided 
+startsWith("[")?t.hostname.slice(1,-1):t.hostname,path:`${t.pathname||""}${t.search||""}`},""!==t.port&&(s.port=Number(t.port)),
+me||t.password)&&(s.auth=`${t.username}:${t.password}`),r=t.pathname,i=t.origin,void 0!==n&&Object.assign(s,n);else{s=Object.ass
+.port}`:s.hostname);if(i=`${s.protocol||"http:"}//${e}`,r=t.pathname,!r&&s.path)try{r=new URL(s.path,i).pathname||"/"}catch(e){r
+="/"}}return{origin:i,pathname:r,method:s.method?s.method.toUpperCase():"GET",optionsParse
+ll!==(i=t.url)&&void 0!==i?i:"/",`${e}://localhost`);return{pathname:n.pathname,search:n.search,toString:function(){return n.pat
+m request",e),{}}}(n.component,e,r);null!=(null==g?void 0:g.pathname)&&(m[i.ATTR_URL_PATH]=g.pathname),null!=f&&(m[i.ATTR_CLIENT
+eof A&&(R[i.SEMATTRS_HTTP_SERVER_NAME]=A),(null==g?void 0:g.pathname)&&(R[i.SEMATTRS_HTTP_TARGET]=(null==g?void 0:g.pathname)+(n
+ppressTracing((()=>{const e=r.request({method:"POST",path:n.pathname,hostname:n.hostname,port:n.port,headers:{"Content-Type":"ap
+st",n.port&&(e.port=n.port));const t=a.parse(n.path||"/");e.pathname=t.pathname,e.search=t.search,e.hash=t.hash,r=a.format(e)}re
+ i(e){return"isRelative"in e}function s(e){if(i(e))return e.pathname;const t=new URL(e);return t.search="",t.hash="",["80","443"
+?.method?.toUpperCase()??"GET"} ${r||(e?"client"===t?s(e):e.pathname:"/")}`}t.getHttpSpanDetailsFromUrlObject=function(e,t,n,s,a
+"url.query"]=e.search),e.hash&&(c["url.fragment"]=e.hash),e.pathname&&(c["url.path"]=e.pathname,"/"===e.pathname&&(c[r.SEMANTIC_
+rse(e,r))return;const t=new URL(e,r);return n?{isRelative:n,pathname:t.pathname,search:t.search,hash:t.hash}:t}catch{}},t.parseU
+.browserPerformanceTimeOrigin();_(e,{name:o.WINDOW.location.pathname,startTime:t?t/1e3:void 0,attributes:{[r.SEMANTIC_ATTRIBUTE_
+!(i-n.start_timestamp>.3)&&!(t&&i-t<=.3)}(a,F);E(e,{name:s?.pathname||o.WINDOW.location.pathname,attributes:{[r.SEMANTIC_ATTRIBU
+,n=a.has(t.hostname);return t.protocol=n?"http:":"https:",t.pathname=`${t.pathname.replace(/\/$/,"")}/retranscribe`,t.search="",
+Sockets:30,timeout:2e3}),E=function(e,t,n){const{hostname:r,pathname:i,port:c,protocol:l,search:u}=new URL(e.url);return functio
+Gzip()));const _=i.net.request(function(e){const{hostname:t,pathname:n,port:r,protocol:i,search:s}=new o.URL(e);return{method:"P
+"token")&&t.searchParams.set("token","***"),`${t.origin}${t.pathname}${t.search?`?${t.searchParams.toString()}`:""}`}catch{retur
+omePattern(i.toString(),t)||o&&r.stringMatchesSomePattern(i.pathname,t):o}{const n=!!e.match(/^\/(?!\/)/);return t?r.stringMatch
+es.URL_FULL]:a.toString(),[c.SemanticAttributes.URL_PATH]:a.pathname,[c.SemanticAttributes.URL_QUERY]:a.search,[c.SemanticAttrib

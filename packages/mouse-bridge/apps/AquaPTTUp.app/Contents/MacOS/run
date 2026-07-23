@@ -1,0 +1,2 @@
+#!/bin/bash
+exec "/Users/mh/code/aqua-logitech-discord/packages/mouse-bridge/scripts/ghub/button2-up.sh"

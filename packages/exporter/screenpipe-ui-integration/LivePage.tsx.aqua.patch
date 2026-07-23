@@ -1,0 +1,85 @@
+diff --git a/packages/web/src/pages/LivePage.tsx b/packages/web/src/pages/LivePage.tsx
+index 7c7260e..46f3e39 100644
+--- a/packages/web/src/pages/LivePage.tsx
++++ b/packages/web/src/pages/LivePage.tsx
+@@ -20,6 +20,13 @@ import {
+   nextAudioLevelHistory,
+ } from "./live-utils";
+ import type { DiscordSpeakingEvent } from "./live-utils";
++import { EnginePanel } from "./EnginePanel";
++
++const sttEngines = [
++  { value: "whisper", label: "Whisper (large-v3-turbo)" },
++  { value: "aqua", label: "Aqua Voice (avalon-v1.1)" },
++] as const;
++type SttEngine = (typeof sttEngines)[number]["value"];
+ 
+ const POLL_INTERVAL_MS = 2_000;
+ const TRANSCRIPT_LIMIT = 80;
+@@ -53,6 +60,7 @@ export function LivePage({ client }: { client: ScreenpipeUIClient }) {
+   const [deviceLevelHistory, setDeviceLevelHistory] = useState<
+     Record<string, number[]>
+   >({});
++  const [sttEngine, setSttEngine] = useState<SttEngine>("whisper");
+   const [modelSize, setModelSize] =
+     useState<(typeof whisperModels)[number]>("whisper-large-v3-turbo");
+   const [language, setLanguage] = useState("de");
+@@ -287,7 +295,12 @@ export function LivePage({ client }: { client: ScreenpipeUIClient }) {
+           </div>
+ 
+           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
+-            <span>STT engine: {sttModel ?? "waiting for first segment"}</span>
++            <span>
++              STT engine:{" "}
++              {sttEngine === "aqua"
++                ? "Aqua Voice (avalon-v1.1)"
++                : (sttModel ?? "waiting for first segment")}
++            </span>
+             <span>Language: {language === "de" ? "German" : language}</span>
+             <span>Discord speakers: {speakerSocketStatus}</span>
+             <span>
+@@ -525,6 +538,36 @@ export function LivePage({ client }: { client: ScreenpipeUIClient }) {
+                     </div>
+                   </div>
+ 
++                  <div className="flex-none rounded-md border border-gray-800 bg-gray-950 p-3">
++                    <h2 className="mb-2 text-sm font-semibold text-gray-100">
++                      Transcription engine
++                    </h2>
++                    <label className="text-xs text-gray-500">
++                      Engine
++                      <select
++                        value={sttEngine}
++                        onChange={(event) =>
++                          setSttEngine(event.target.value as SttEngine)
++                        }
++                        className="mt-1 w-full rounded-md border border-gray-700 bg-gray-900 px-2 py-2 text-sm text-gray-100 outline-none"
++                      >
++                        {sttEngines.map((engine) => (
++                          <option key={engine.value} value={engine.value}>
++                            {engine.label}
++                          </option>
++                        ))}
++                      </select>
++                    </label>
++                    <p className="mt-2 text-[11px] leading-5 text-gray-500">
++                      {sttEngine === "aqua"
++                        ? "Live transcription runs through the Aqua Voice bridge instead of Whisper."
++                        : "Default: local Whisper large-v3-turbo."}
++                    </p>
++                  </div>
++
++                  <EnginePanel engine={sttEngine} />
++
++                  {sttEngine === "whisper" && (
+                   <div className="flex-none rounded-md border border-gray-800 bg-gray-950 p-3">
+                     <h2 className="mb-2 text-sm font-semibold text-gray-100">
+                       Whisper settings
+@@ -589,6 +632,7 @@ export function LivePage({ client }: { client: ScreenpipeUIClient }) {
+                       music/VAD filtering where available, mic VoiceProcessingIO.
+                     </p>
+                   </div>
++                  )}
+                 </>
+               )}
+             </aside>
