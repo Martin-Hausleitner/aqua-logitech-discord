@@ -1,29 +1,32 @@
 # G HUB setup (Pro X 2 Wireless)
 
-## Current problem (observed in settings.db)
-
-- Slot `prox2wirelessmouse_g4_m1` → macro **`cm enter`** (Command then Enter).
-- That sends Enter immediately — **before** Aqua finishes transcription/paste.
-
-## Target mapping
+## Target mapping (2026-07-24)
 
 | Physical | G HUB slot (typical) | Action |
 |----------|----------------------|--------|
-| Forward thumb (Button 1) | `g4_m1` | Launch `packages/mouse-bridge/scripts/ghub/button1.command` |
-| Back thumb (Button 2) | `g5_m1` | Prefer press/release scripts; if G HUB cannot do release hooks, use a held system key that only the bridge owns (future), or assign down-only and accept degraded PTT |
+| Forward thumb (Button 1 / G4) | `g4_m1` | **Launch Application** → `packages/mouse-bridge/apps/AquaButton1.app` |
+| Back thumb (Button 2 / G5) | `g5_m1` | Do **not** rely on G HUB press/release apps. Use **Karabiner** `button5→Fn` — see `packages/mouse-bridge/karabiner/README.md`. Leave G5 as default button or unused in G HUB. |
+
+## Bridge semantics (API / AquaButton1.app)
+
+| Event | Behaviour |
+|-------|-----------|
+| Button1 idle | Start Aqua via **latched Fn** (`fn-down`); `recording:true` |
+| Button1 while recording | `fn-up` → wait settle (wav/history/quiet) → **Enter** |
+| Button1 after PTT | **Enter only** (no restart) |
+| Button2 down/up (API) | Fn down/up; **no Enter** |
+
+`AQUA_TOGGLE_MODE=fn-latch` (default). Optional `f19` mode exists but F19/MetaRight synthetic lock was unreliable on this Mac.
 
 ## Steps
 
 1. Ensure bridge is running: `curl http://127.0.0.1:8690/status`
-2. Open **Logitech G HUB** → device **PRO X 2 WIRELESS** → **ASSIGNMENTS**
-3. Click **G4** → delete / unassign `cm enter`
-4. Assign **System** → **Launch application** / open file →  
-   `/Users/mh/code/aqua-logitech-discord/packages/mouse-bridge/scripts/ghub/button1.command`
-5. For **G5**: if possible, create two macros (press / release) calling `button2-down.command` / `button2-up.command`.  
-   If G HUB only fires on click: PTT quality will be worse — use Button1 toggle mode instead until press/release is wired.
-6. Grant macOS **Accessibility** to `node` (Homebrew) when first HID tap is blocked.
+2. Open **Logitech G HUB** → **PRO X 2 WIRELESS** → **ASSIGNMENTS**
+3. **G4** → Launch Application → AquaButton1.app (path under this repo)
+4. **G5** → install Karabiner rule (not G HUB Launch Application press/release)
+5. Grant **Accessibility** to the `node` that runs the LaunchAgent (and Cursor/Terminal if testing interactively)
 
 ## Do not
 
-- Bind Enter, Return, or Cmd+Enter directly on these buttons in G HUB.
-- Point LaunchAgent paths back at `~/code/vencord-aqua-mute` (superseded by this monorepo).
+- Bind Enter / Return / Cmd+Enter on these buttons in G HUB.
+- Expect G HUB Launch Application to do separate press vs release hooks (not supported).

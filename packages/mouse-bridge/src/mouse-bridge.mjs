@@ -6,13 +6,16 @@
  *   HTTP  http://127.0.0.1:8690/button1 | /button2/down | /button2/up | /status
  *   Env   AQUA_BRIDGE_PORT (default 8690)
  *
- * Aqua control (proven path from N281 e2e):
- *   - Toggle / lock: synthetic MetaRight (vk 54) via hid-tap binary
- *   - PTT activate: synthetic Fn (vk 63 + maskSecondaryFn) down/up
+ * Aqua control:
+ *   - Toggle: latched synthetic Fn (fn-down on start, fn-up on stop).
+ *     MetaRight/F19 lock taps are unreliable via CGEvent on this Mac; Fn activate is proven.
+ *   - PTT: same Fn down/up on button2 press/release (mutually exclusive via state machine)
  *   - Send: Return (vk 36) ONLY after settle heuristic
  *
  * G HUB: assign side buttons to "System → Open file / Run" scripts in scripts/ghub/
  *   (or keystroke macros that curl these endpoints). Do NOT bind Enter in G HUB.
+ *
+ * Optional: AQUA_TOGGLE_MODE=f19 to use hid-tap f19 instead (requires Aqua lock=F19).
  */
 
 import { createServer } from "node:http";
@@ -29,6 +32,8 @@ const HID = join(ROOT, "bin", "hid-tap");
 const PORT = Number(process.env.AQUA_BRIDGE_PORT ?? 8690);
 const WATCH_PORT = Number(process.env.AQUA_WATCH_PORT ?? 8688);
 const DRY = process.env.AQUA_BRIDGE_DRY === "1";
+/** @type {"fn-latch"|"f19"} */
+const TOGGLE_MODE = process.env.AQUA_TOGGLE_MODE === "f19" ? "f19" : "fn-latch";
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
@@ -83,9 +88,14 @@ async function runActions(actions) {
   for (const a of actions) {
     switch (a) {
       case "TOGGLE_START":
+        log(a, `mode=${TOGGLE_MODE}`);
+        if (TOGGLE_MODE === "f19") hid(process.env.AQUA_LOCK_HID ?? "f19");
+        else hid("fn-down");
+        break;
       case "TOGGLE_STOP":
-        log(a);
-        hid("meta-right");
+        log(a, `mode=${TOGGLE_MODE}`);
+        if (TOGGLE_MODE === "f19") hid(process.env.AQUA_LOCK_HID ?? "f19");
+        else hid("fn-up");
         break;
       case "PTT_DOWN":
         log(a);
@@ -179,7 +189,7 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, "127.0.0.1", () => {
   log(`mouse-bridge on http://127.0.0.1:${PORT}`);
-  log(`hid-tap: ${existsSync(HID) ? HID : "MISSING"} dry=${DRY}`);
+  log(`hid-tap: ${existsSync(HID) ? HID : "MISSING"} dry=${DRY} toggle=${TOGGLE_MODE}`);
   connectWatch();
 });
 

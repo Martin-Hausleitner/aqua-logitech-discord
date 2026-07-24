@@ -1,0 +1,15 @@
+{
+  "title": "Aqua PTT — mouse button5 to Fn",
+  "rules": [
+    {
+      "description": "Logitech G5 / mouse button5 → Fn hold for Aqua PTT",
+      "manipulators": [
+        {
+          "type": "basic",
+          "from": { "pointing_button": "button5" },
+          "to": [{ "key_code": "fn" }]
+        }
+      ]
+    }
+  ]
+}

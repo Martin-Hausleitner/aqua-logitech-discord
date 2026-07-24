@@ -3,7 +3,8 @@ import CoreGraphics
 
 /// Tiny HID helper for Aqua Voice hotkeys.
 /// Usage:
-///   hid-tap meta-right   # Aqua lock/toggle (MetaRight)
+///   hid-tap f19          # Aqua lock/toggle (preferred; non-modifier)
+///   hid-tap meta-right   # Aqua lock/toggle (MetaRight) — often fails synthetically
 ///   hid-tap fn-down      # Aqua activate PTT press (synthetic Fn)
 ///   hid-tap fn-up
 ///   hid-tap enter
@@ -11,8 +12,10 @@ import CoreGraphics
 ///
 /// Note: System Events / AppleScript Fn does NOT work for Aqua.
 /// CGEvent via .cghidEventTap does (proven in N281 e2e-proof).
+/// F19 (vk 80) is preferred for lock — MetaRight/AltRight synthetic often miss Aqua.
 
 enum Cmd: String {
+    case f19 = "f19"
     case metaRight = "meta-right"
     case altRight = "alt-right"
     case fnDown = "fn-down"
@@ -37,11 +40,14 @@ func tapOnce(_ virtualKey: CGKeyCode, flags: CGEventFlags = []) {
 }
 
 guard CommandLine.arguments.count >= 2, let cmd = Cmd(rawValue: CommandLine.arguments[1]) else {
-    fputs("usage: hid-tap meta-right|alt-right|fn-down|fn-up|enter\n", stderr)
+    fputs("usage: hid-tap f19|meta-right|alt-right|fn-down|fn-up|enter\n", stderr)
     exit(1)
 }
 
 switch cmd {
+case .f19:
+    // F19 = vk 80 (kVK_F19) — Aqua supports F13–F19 since 0.2.12
+    tapOnce(80)
 case .metaRight:
     // Right Command = vk 54
     tapOnce(54)

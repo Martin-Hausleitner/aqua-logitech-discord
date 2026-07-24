@@ -63,12 +63,11 @@ From `~/Library/Application Support/Aqua Voice/settings.json`:
 
 | Requirement | Status |
 |-------------|--------|
-| Discord mute sync via Vencord + CoreAudio helper | Code merged from proven N281 path; helper was **disabled** (`plist.disabled`) — reinstall via script |
-| Button1 toggle + Enter after transcript settle | State machine + settle heuristic implemented; needs G HUB reassignment + Accessibility |
-| Button2 PTT no Enter; Button1 tap after = Enter | Implemented in state machine |
-| Configure G HUB / Aqua via Computer Use | Documented manual steps; G HUB DB shows `pro_x_2_wireless_mouse`; G4 currently bound to broken `cm enter` macro |
-| Non-Vencord mute path | Not implemented (would be fragile); Vencord path preserved |
-| Registration-Verse | **Not found** |
+| Discord mute sync via Vencord + CoreAudio helper | Helper + plugin code present; **E2E mute BLOCKED 2026-07-24** (`apps.discord.online=false`) — enable AquaMuteSync in Discord |
+| Button1 toggle + Enter after transcript settle | **API PASS 2026-07-24** via latched Fn (`AQUA_TOGGLE_MODE=fn-latch`); settle `reason=wav` then Enter. MetaRight/F19 lock unreliable via CGEvent |
+| Button2 PTT no Enter; Button1 tap after = Enter | **API PASS 2026-07-24** |
+| Physical G4/G5 + G HUB | G4→AquaButton1.app rebound previously; physical clicks **not observed** this session. G5: use Karabiner `button5→Fn` (see `packages/mouse-bridge/karabiner/`) |
+| E2E harness | `bash scripts/e2e-aqua-mouse.sh` → `.proof/e2e-*/` |
 
 ## Manual next steps (operator)
 
