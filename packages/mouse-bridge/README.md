@@ -24,16 +24,15 @@ Discord mute ← Vencord AquaMuteSync ← aqua-watch
 
 ## Settle heuristic (honest)
 
-Not an Aqua public API. Combined signals in `src/settle.mjs`:
+Not an Aqua public API. Enter waits in `src/settle.mjs` for a **transcript** signal:
 
-1. `aqua-watch` `recording: false` after true (CoreAudio STOP)
-2. New/updated `AQ_*.wav` under Aqua Support
-3. `history.json` mtime advance
-4. Optional clipboard change
-5. Fallback: quiet period after stop (`minQuietMs`, default 400ms)
-6. Hard cap: `maxWaitMs` (default 12s)
+1. `aqua-watch` recording true→false (must stop first)
+2. **New `history.json` transcription timestamp** (primary — paste/persist done)
+3. or `history.json` mtime advance / clipboard change
+4. short `postTranscriptMs` delay so text can land in the focused field
+5. **No early quiet/wav Enter** — WAV means “file written”, not “transcription finished”. On timeout, Enter is skipped (avoids empty Discord sends).
 
-**Proven on this Mac (2026-07-24):** latched-Fn Button1 toggle → `recording:true/false`, settle `reason=wav`, Enter; PTT API path; PTT then Button1 = Enter only. **Not proven:** physical G4/G5 click this session; Discord mute while plugin `online=false`. MetaRight/F19 lock via CGEvent was unreliable — see `hid-tap f19` kept as optional `AQUA_TOGGLE_MODE=f19`.
+**Proven on this Mac (2026-07-24):** latched-Fn Button1 toggle → `recording:true/false`; settle must use `history_ts` (quiet/wav was the Enter-too-early bug). PTT API path; PTT then Button1 = Enter only. **Not proven:** physical G4/G5; Discord mute while plugin `online=false`.
 
 ## Setup
 

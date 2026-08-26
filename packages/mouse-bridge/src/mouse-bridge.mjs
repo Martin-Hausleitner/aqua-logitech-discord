@@ -105,14 +105,21 @@ async function runActions(actions) {
         log(a);
         hid("fn-up");
         break;
-      case "WAIT_SETTLE":
+      case "WAIT_SETTLE": {
         log(a);
-        await waitUntilSettled({
+        const settle = await waitUntilSettled({
           isRecording: () => aquaRecording,
           readSignals: () => snapshotSignals(),
+          // Prefer history.json new transcription ts — wav/quiet are too early.
           log: (m) => log(m),
         });
+        if (!settle.ok) {
+          log(`settle FAILED (${settle.reason}) — skipping ENTER to avoid empty send`);
+          machine = reduce(machine, { type: "SETTLE_DONE" }).state;
+          return; // abort remaining actions (including ENTER)
+        }
         break;
+      }
       case "ENTER":
         log(a);
         hid("enter");
