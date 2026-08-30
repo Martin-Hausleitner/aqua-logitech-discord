@@ -51,6 +51,27 @@ Origins: see [ATTRIBUTION.md](./ATTRIBUTION.md).
 # Then reassign G HUB G4/G5 — see packages/mouse-bridge/README.md
 ```
 
+The canonical path emits exactly one `set_recording` frame before the HID action.
+Legacy `/shortcut/left` and `/shortcut/right` endpoints are disabled unless
+`AQUA_SHORTCUT_ENDPOINTS_ENABLED=1` is set explicitly.
+
+## Passive latency benchmark
+
+`packages/benchmark/observe.mjs` is a local, read-only observer for
+`ws://127.0.0.1:8688`. It never sends `app_state`, `set_recording`, input,
+or process-control commands.
+
+```bash
+node packages/benchmark/observe.mjs "$HOME/Library/Logs/aqua-hook-benchmark.jsonl"
+node --test packages/benchmark/*.test.mjs
+```
+
+Keep the JSONL file private. Report start and stop separately, exclude exactly
+five warmups, require at least twenty measured trials, and publish p50/p95/p99
+only when every trial has an actual Discord confirmation and restores the
+original mute state. A software endpoint run is not proof of physical
+button-to-audio latency.
+
 ## Aqua hotkeys (current machine)
 
 From `~/Library/Application Support/Aqua Voice/settings.json`:

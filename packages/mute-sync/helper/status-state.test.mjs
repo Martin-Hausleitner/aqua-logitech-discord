@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { STATUS_PROTOCOL_VERSION, StatusState } from "./status-state.mjs";
+import { BRIDGE_LATCH_MS, STATUS_PROTOCOL_VERSION, StatusState } from "./status-state.mjs";
 
 test("initial snapshot reports Discord as offline and unknown", () => {
     const state = new StatusState({ now: () => 1000 });
@@ -13,6 +13,8 @@ test("initial snapshot reports Discord as offline and unknown", () => {
         recording: false,
         source: "init",
         degraded: true,
+        intent: null,
+        confirmation: null,
         apps: {
             discord: { muted: null, online: false, seq: 0, ts: 0 }
         }
@@ -57,4 +59,60 @@ test("unknown app identifiers cannot enter the snapshot", () => {
         app: "meet", muted: true, clientSeq: 0
     }), false);
     assert.equal(Object.hasOwn(state.snapshot().apps, "meet"), false);
+});
+
+test("bridge recording is applied immediately", () => {
+    const state = new StatusState({ now: () => 1000 });
+    assert.equal(state.setRecording(true, "bridge"), true);
+    assert.equal(state.recording, true);
+    assert.equal(state.source, "bridge");
+});
+
+test("late coreaudio START after bridge STOP is ignored within latch", () => {
+    let t = 1000;
+    const state = new StatusState({ now: () => t });
+    assert.equal(state.setRecording(true, "bridge"), true);
+    t = 1100;
+    assert.equal(state.setRecording(false, "bridge"), true);
+    t = 1200;
+    assert.equal(state.setRecording(true, "coreaudio"), false);
+    assert.equal(state.recording, false);
+    assert.equal(state.source, "bridge");
+});
+
+test("coreaudio START that agrees with bridge confirms without transition", () => {
+    let t = 1000;
+    const state = new StatusState({ now: () => t });
+    assert.equal(state.setRecording(true, "bridge"), true);
+    t = 1100;
+    assert.equal(state.setRecording(true, "coreaudio"), true);
+    assert.equal(state.recording, true);
+    assert.equal(state.source, "bridge");
+    assert.equal(state.confirmation.source, "coreaudio");
+});
+
+test("a second online producer is rejected until the first disconnects", () => {
+    const state = new StatusState();
+    const first = Symbol("first");
+    const second = Symbol("second");
+    assert.equal(state.reportApp(first, { app: "discord", muted: true, clientSeq: 0 }), true);
+    assert.equal(state.reportApp(second, { app: "discord", muted: false, clientSeq: 0 }), false);
+    state.disconnect(first);
+    assert.equal(state.reportApp(second, { app: "discord", muted: false, clientSeq: 1 }), true);
+});
+
+test("recording bridge metadata is strict", () => {
+    const state = new StatusState();
+    assert.equal(state.setRecording(true, "bridge", { hookSeq: -1, hookMonoNs: "1" }), false);
+    assert.equal(state.setRecording(true, "bridge", { hookSeq: 1, hookMonoNs: "1.2" }), false);
+    assert.equal(state.setRecording(true, "bridge", { hookSeq: 1, hookMonoNs: "123" }), true);
+});
+
+test("coreaudio may disagree after the latch window", () => {
+    let t = 1000;
+    const state = new StatusState({ now: () => t });
+    assert.equal(state.setRecording(true, "bridge"), true);
+    t = 1000 + BRIDGE_LATCH_MS + 1;
+    assert.equal(state.setRecording(false, "coreaudio"), true);
+    assert.equal(state.recording, false);
 });
