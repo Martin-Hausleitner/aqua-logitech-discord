@@ -29,10 +29,13 @@ const AQUA_DIR = join(homedir(), "Library/Application Support/Aqua Voice");
 const MIC_TIMINGS = join(AQUA_DIR, "mic_timings.json");
 const AUDIO_DIR = join(AQUA_DIR, "audio");
 const WATCHER_BIN = join(dirname(fileURLToPath(import.meta.url)), "aqua-mic-watch");
-const POLL_MS = 500;
+const POLL_MS = 50;
 // Nur im degraded mode (Eventkanal tot): Aufnahme ohne Stop-Signal gilt nach
 // STALE_MS als beendet (Aqua-Diktate sind kurz; wav-Stopp feuert normalerweise früher).
 const STALE_MS = 120_000;
+// AQUA_WATCH_CONTROL=0 verriegelt jede Steuer-/Relay-Route (set_recording mit
+// source=control, set_mute/toggle_mute/aqua_toggle) — Pflicht im Physical-Run-Fenster.
+const CONTROL_ENABLED = process.env.AQUA_WATCH_CONTROL !== "0";
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
@@ -45,8 +48,12 @@ const stateMsg = () => JSON.stringify(status.snapshot());
 
 let wss;
 
-function setRecording(next, src) {
-    if (!status.setRecording(next, src)) return;
+function setRecording(next, src, metadata) {
+    if (status.isBridgeLatched(next, src)) {
+        log(`ignore ${src} recording=${next} (bridge latch)`);
+        return;
+    }
+    if (!status.setRecording(next, src, metadata)) return;
     lastChange = Date.now();
     log(`recording=${next} (${src}) seq=${status.seq}`);
     broadcastState();
@@ -68,6 +75,30 @@ function startServer() {
                 if (m.type === "get_state") ws.send(stateMsg());
                 else if (m.v === 1 && m.type === "app_state" && status.reportApp(client, m))
                     broadcastState();
+                else if (m.type === "set_recording") {
+                    if (typeof m.recording !== "boolean") return;
+                    const source = m.source || "control";
+                    if (source !== "bridge" && source !== "control") return;
+                    if (source === "control" && !CONTROL_ENABLED) {
+                        log(`drop control set_recording=${m.recording} (AQUA_WATCH_CONTROL=0)`);
+                        return;
+                    }
+                    if (!Number.isSafeInteger(m.hookSeq) || m.hookSeq < 0) return;
+                    if (typeof m.hookMonoNs !== "string" || !/^\d+$/.test(m.hookMonoNs)) return;
+                    setRecording(m.recording, source, { hookSeq: m.hookSeq, hookMonoNs: m.hookMonoNs });
+                } else if (m.type === "set_mute" || m.type === "toggle_mute" || m.type === "aqua_toggle") {
+                    // Konkurrierende Steuer-Route: nie unsichtbar — zählen, loggen, broadcasten.
+                    if (!CONTROL_ENABLED) {
+                        log(`drop control relay ${m.type} (AQUA_WATCH_CONTROL=0)`);
+                        return;
+                    }
+                    status.noteControlRelay();
+                    log(`control relay ${m.type} (#${status.controlRelays})`);
+                    for (const c of wss?.clients ?? []) {
+                        if (c !== ws && c.readyState === 1) c.send(JSON.stringify(m));
+                    }
+                    broadcastState();
+                }
             } catch { /* ignore */ }
         });
         ws.on("close", () => {
