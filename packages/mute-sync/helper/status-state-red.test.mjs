@@ -3,11 +3,19 @@ import assert from 'node:assert/strict';
 import { StatusState } from './status-state.mjs';
 
 test('bridge command records hook intent metadata in snapshot', () => {
-  const state = new StatusState();
+  const state = new StatusState({ monoNow: () => '999999' });
   state.setRecording(true, 'bridge', { hookSeq: 7, hookMonoNs: '123456' });
   assert.deepEqual(state.snapshot().intent, {
-    hookSeq: 7, hookMonoNs: '123456', recording: true, source: 'bridge',
+    hookSeq: 7, hookMonoNs: '123456', recording: true, source: 'bridge', intentMonoNs: '999999',
   });
+});
+
+test('every transition carries the helper same-clock intent stamp — coreaudio included', () => {
+  const state = new StatusState({ monoNow: () => '424242' });
+  state.setRecording(true, 'coreaudio');
+  const intent = state.snapshot().intent;
+  assert.deepEqual(intent, { recording: true, source: 'coreaudio', intentMonoNs: '424242' });
+  assert.equal('confirmationMonoNs' in intent, false);
 });
 
 test('agreeing coreaudio event records confirmation without duplicate transition', () => {

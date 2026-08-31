@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { framesToTrials, convertJsonl } from './frames-to-trials.mjs';
+import { framesToTrials, convertJsonl, summarizeShortcutRun } from './frames-to-trials.mjs';
 import { validateRunManifest, summarizeManifestTrials } from './jsonl-cycles.mjs';
 
 const NS = 1_000_000n;
@@ -203,4 +203,78 @@ test('convertJsonl round-trips serialized frames', () => {
   const text = frames.map(f => JSON.stringify(f)).join('\n');
   const { trials } = convertJsonl(text);
   assert.equal(trials.length, 1);
+});
+
+/** Keyboard-shortcut route: coreaudio transitions with intentMonoNs, no bridge hook. */
+function shortcutCycle(atMs, { baseMuted = false, staleMute = false } = {}) {
+  const startRef = String(BigInt(atMs) * NS);
+  const stopRef = String(BigInt(atMs + 1500) * NS);
+  const disc = (muted, s) => ({ muted, online: true, stateSeq: s, clientMonoMs: s });
+  return [
+    frame(atMs - 40, { discord: disc(baseMuted, 1) }),
+    frame(atMs + 12, { recording: true, source: 'coreaudio', intent: { recording: true, source: 'coreaudio', intentMonoNs: startRef }, discord: disc(baseMuted, 1) }),
+    frame(atMs + (staleMute ? 1400 : 45), { sameState: true, recording: true, source: 'coreaudio', intent: { recording: true, source: 'coreaudio', intentMonoNs: startRef }, discord: disc(true, 2) }),
+    frame(atMs + 1510, { recording: false, source: 'coreaudio', intent: { recording: false, source: 'coreaudio', intentMonoNs: stopRef }, discord: disc(true, 2) }),
+    frame(atMs + 1560, { sameState: true, recording: false, source: 'coreaudio', intent: { recording: false, source: 'coreaudio', intentMonoNs: stopRef }, discord: disc(baseMuted, 3) }),
+  ];
+}
+
+test('coreaudio route: a shortcut cycle qualifies without a bridge hook', () => {
+  resetSeq();
+  const { trials, invalid } = framesToTrials(shortcutCycle(1000), { route: 'coreaudio' });
+  assert.deepEqual(invalid, []);
+  assert.equal(trials.length, 1);
+  assert.equal(trials[0].route, 'coreaudio');
+  assert.equal(trials[0].discord.freshMs, 45);
+  assert.equal(trials[0].restoreMs, 60);
+  assert.equal(trials[0].hookStartToHelperMs, 12);
+  assert.equal('confirmation' in trials[0], false);
+});
+
+test('coreaudio route: bridge frames are route_mismatch and vice versa', () => {
+  resetSeq();
+  const { frames } = validCycle(1000, 40);
+  const out = framesToTrials(frames, { route: 'coreaudio' });
+  assert.equal(out.trials.length, 0);
+  assert.ok(out.invalid[0].reasons.includes('route_mismatch'));
+});
+
+test('coreaudio route: a missing intentMonoNs is clock_mismatch', () => {
+  resetSeq();
+  const cycle = shortcutCycle(1000);
+  delete cycle[1].intent.intentMonoNs;
+  const { invalid } = framesToTrials(cycle, { route: 'coreaudio' });
+  assert.ok(invalid[0].reasons.includes('clock_mismatch'));
+});
+
+test('coreaudio route: degraded (poll fallback) cycles never qualify', () => {
+  resetSeq();
+  const cycle = shortcutCycle(1000);
+  cycle[2].degraded = true;
+  const { trials, invalid } = framesToTrials(cycle, { route: 'coreaudio' });
+  assert.equal(trials.length, 0);
+  assert.ok(invalid[0].reasons.includes('degraded'));
+});
+
+test('summarizeShortcutRun stays red below 25 cycles and reports honest percentiles above', () => {
+  resetSeq();
+  const few = framesToTrials(shortcutCycle(1000), { route: 'coreaudio' });
+  const red = summarizeShortcutRun(few);
+  assert.equal(red.all_gates_valid, false);
+  assert.ok(red.invalid_reasons.includes('insufficient_trials'));
+
+  resetSeq();
+  const frames = [];
+  for (let i = 0; i < 26; i++) frames.push(...shortcutCycle(1000 + i * 3000, { staleMute: i === 25 }));
+  const converted = framesToTrials(frames, { route: 'coreaudio' });
+  assert.equal(converted.trials.length, 25);
+  assert.equal(converted.invalid.length, 1);
+  assert.deepEqual(converted.invalid[0].reasons, ['stale']);
+  const green = summarizeShortcutRun(converted);
+  assert.equal(green.all_gates_valid, true);
+  assert.equal(green.route, 'aqua-shortcut-coreaudio-8688');
+  assert.equal(green.measuredTrials, 20);
+  assert.equal(green.percentiles.p50, 45);
+  assert.equal(green.restorePercentiles.p50, 60);
+  assert.deepEqual(green.invalidCycles, converted.invalid);
 });

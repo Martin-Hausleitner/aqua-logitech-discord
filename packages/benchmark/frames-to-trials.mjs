@@ -22,15 +22,20 @@ const bridgeIntent = f => f?.source === 'bridge' && f?.intent?.source === 'bridg
   && Number.isInteger(f.intent.hookSeq) && f.intent.hookSeq >= 0 && digits(f.intent.hookMonoNs);
 const msSince = (monoNs, hookMonoNs) => Number((BigInt(monoNs) - BigInt(hookMonoNs)) / 1000000n);
 
-function edgeReasons(frame, recording) {
+function edgeReasons(frame, recording, route) {
   const reasons = [];
-  if (frame.source !== 'bridge' || frame.intent?.source !== 'bridge' || frame.intent?.recording !== recording) reasons.push('route_mismatch');
-  else {
+  if (frame.source !== route || frame.intent?.source !== route || frame.intent?.recording !== recording) reasons.push('route_mismatch');
+  else if (route === 'bridge') {
     if (!(Number.isInteger(frame.intent.hookSeq) && frame.intent.hookSeq >= 0)) reasons.push('seq_mismatch');
     if (!digits(frame.intent.hookMonoNs)) reasons.push('clock_mismatch');
+  } else if (!digits(frame.intent.intentMonoNs)) {
+    reasons.push('clock_mismatch');
   }
   return reasons;
 }
+
+/** The same-clock hook reference for one edge, per route. */
+const hookRef = (frame, route) => route === 'bridge' ? frame.intent.hookMonoNs : frame.intent.intentMonoNs;
 
 /** Find the same-stateSeq hookless CoreAudio confirmation for one edge. */
 function findConfirmation(frames, fromIndex, endIndex, stateSeq, recording) {
@@ -44,8 +49,9 @@ function findConfirmation(frames, fromIndex, endIndex, stateSeq, recording) {
   return null;
 }
 
-export function framesToTrials(frames, { freshLimitMs = FRESH_LIMIT_MS } = {}) {
+export function framesToTrials(frames, { freshLimitMs = FRESH_LIMIT_MS, route = 'bridge' } = {}) {
   if (!Array.isArray(frames)) throw new TypeError('frames must be an array');
+  if (route !== 'bridge' && route !== 'coreaudio') throw new TypeError(`unknown route: ${route}`);
   const invalid = [];
   const trials = [];
   let prevObserver = -1;
@@ -92,8 +98,8 @@ export function framesToTrials(frames, { freshLimitMs = FRESH_LIMIT_MS } = {}) {
     const reasons = new Set();
     cycleIndex++;
 
-    for (const r of edgeReasons(start, true)) reasons.add(r);
-    for (const r of edgeReasons(stop, false)) reasons.add(r);
+    for (const r of edgeReasons(start, true, route)) reasons.add(r);
+    for (const r of edgeReasons(stop, false, route)) reasons.add(r);
     if (base.discord.muted === true) reasons.add('baseline_premuted');
     if (window.some(w => w.degraded)) reasons.add('degraded');
     if (window.some(w => w.discord.online !== true)) reasons.add('degraded');
@@ -101,9 +107,15 @@ export function framesToTrials(frames, { freshLimitMs = FRESH_LIMIT_MS } = {}) {
     if (window.some(w => w.controlRelays !== undefined && relayBase !== undefined && w.controlRelays !== relayBase)) reasons.add('synthetic_control');
     if (window.some(w => w.controlRelays !== undefined) && relayBase === undefined) reasons.add('synthetic_control');
 
-    const startConf = findConfirmation(frames, startIndex, stopIndex + 1, start.stateSeq, true);
-    const stopConf = findConfirmation(frames, stopIndex, windowEnd, stop.stateSeq, false);
-    if (!startConf || !stopConf) reasons.add('confirmation_mismatch');
+    // Bridge route: the hookless CoreAudio agreement is the required second
+    // channel. Coreaudio route: the transition itself IS the CoreAudio event.
+    let startConf = null;
+    let stopConf = null;
+    if (route === 'bridge') {
+      startConf = findConfirmation(frames, startIndex, stopIndex + 1, start.stateSeq, true);
+      stopConf = findConfirmation(frames, stopIndex, windowEnd, stop.stateSeq, false);
+      if (!startConf || !stopConf) reasons.add('confirmation_mismatch');
+    }
 
     let freshMs = null;
     let restoreMs = null;
@@ -112,16 +124,18 @@ export function framesToTrials(frames, { freshLimitMs = FRESH_LIMIT_MS } = {}) {
     let hookStartToCoreAudioMs = null;
     let hookStopToCoreAudioMs = null;
     if (!reasons.has('route_mismatch') && !reasons.has('seq_mismatch') && !reasons.has('clock_mismatch')) {
-      hookStartToHelperMs = msSince(start.observerMonoNs, start.intent.hookMonoNs);
-      hookStopToHelperMs = msSince(stop.observerMonoNs, stop.intent.hookMonoNs);
+      const startRef = hookRef(start, route);
+      const stopRef = hookRef(stop, route);
+      hookStartToHelperMs = msSince(start.observerMonoNs, startRef);
+      hookStopToHelperMs = msSince(stop.observerMonoNs, stopRef);
       if (hookStartToHelperMs < 0 || hookStopToHelperMs < 0) reasons.add('clock_mismatch');
-      if (startConf?.confirmation.confirmationMonoNs) hookStartToCoreAudioMs = msSince(startConf.confirmation.confirmationMonoNs, start.intent.hookMonoNs);
-      if (stopConf?.confirmation.confirmationMonoNs) hookStopToCoreAudioMs = msSince(stopConf.confirmation.confirmationMonoNs, stop.intent.hookMonoNs);
+      if (startConf?.confirmation.confirmationMonoNs) hookStartToCoreAudioMs = msSince(startConf.confirmation.confirmationMonoNs, startRef);
+      if (stopConf?.confirmation.confirmationMonoNs) hookStopToCoreAudioMs = msSince(stopConf.confirmation.confirmationMonoNs, stopRef);
 
       const muteFrame = window.find(w => w.discord.muted === true && w.discord.online === true);
       if (!muteFrame) reasons.add('discord_not_actual');
       else {
-        freshMs = msSince(muteFrame.observerMonoNs, start.intent.hookMonoNs);
+        freshMs = msSince(muteFrame.observerMonoNs, startRef);
         if (freshMs < 0 || freshMs > freshLimitMs) reasons.add('stale');
       }
 
@@ -129,7 +143,7 @@ export function framesToTrials(frames, { freshLimitMs = FRESH_LIMIT_MS } = {}) {
         .find(w => !w.recording && w.discord.online === true && w.discord.muted === base.discord.muted);
       if (!restoreFrame) reasons.add('restore_missing');
       else {
-        restoreMs = msSince(restoreFrame.observerMonoNs, stop.intent.hookMonoNs);
+        restoreMs = msSince(restoreFrame.observerMonoNs, stopRef);
         if (restoreMs < 0 || restoreMs > freshLimitMs) reasons.add('restore_missing');
       }
     }
@@ -137,14 +151,15 @@ export function framesToTrials(frames, { freshLimitMs = FRESH_LIMIT_MS } = {}) {
     if (reasons.size > 0) {
       invalid.push({ index: cycleIndex, stateSeq: start.stateSeq, reasons: [...reasons].sort() });
     } else {
-      const confirmation = { source: 'coreaudio', recording: true, stateSeq: start.stateSeq };
-      if (startConf.confirmation.confirmationMonoNs) confirmation.confirmationMonoNs = startConf.confirmation.confirmationMonoNs;
-      trials.push({
+      const trial = {
         stateSeq: start.stateSeq,
-        hook: { hookSeq: start.intent.hookSeq, hookMonoNs: start.intent.hookMonoNs, recording: true },
-        confirmation,
+        hook: route === 'bridge'
+          ? { hookSeq: start.intent.hookSeq, hookMonoNs: start.intent.hookMonoNs, recording: true }
+          : { hookSeq: start.stateSeq, hookMonoNs: start.intent.intentMonoNs, recording: true },
         discord: { actual: true, freshMs, cacheOverride: false },
-        stop: { hookSeq: stop.intent.hookSeq, hookMonoNs: stop.intent.hookMonoNs, stateSeq: stop.stateSeq, confirmed: true },
+        stop: route === 'bridge'
+          ? { hookSeq: stop.intent.hookSeq, hookMonoNs: stop.intent.hookMonoNs, stateSeq: stop.stateSeq, confirmed: true }
+          : { hookSeq: stop.stateSeq, hookMonoNs: stop.intent.intentMonoNs, stateSeq: stop.stateSeq, confirmed: true },
         restore: true,
         restoreMs,
         hookStartToHelperMs,
@@ -156,8 +171,14 @@ export function framesToTrials(frames, { freshLimitMs = FRESH_LIMIT_MS } = {}) {
         disconnected: false,
         timeout: false,
         sameClock: true,
+        route,
         evidence: { hook: 'real', helper: 'real', coreaudio: 'real', discord: 'actual' },
-      });
+      };
+      if (route === 'bridge') {
+        trial.confirmation = { source: 'coreaudio', recording: true, stateSeq: start.stateSeq };
+        if (startConf.confirmation.confirmationMonoNs) trial.confirmation.confirmationMonoNs = startConf.confirmation.confirmationMonoNs;
+      }
+      trials.push(trial);
     }
 
     // Continue after the stop frame; idle frames before the next start refresh the baseline.
@@ -171,17 +192,54 @@ export function convertJsonl(text, opts) {
   return framesToTrials(parseJsonl(text), opts);
 }
 
+/** Fail-closed run summary for the keyboard-shortcut (CoreAudio) route. */
+export function summarizeShortcutRun({ trials, cycles, invalid }, { warmups = 5, measuredMinimum = 20 } = {}) {
+  const ts = Array.isArray(trials) ? trials : [];
+  const measured = ts.slice(warmups);
+  const reasons = new Set((invalid ?? []).flatMap(c => c.reasons));
+  const base = {
+    schema: 'aqua.shortcut-run.v1',
+    route: 'aqua-shortcut-coreaudio-8688',
+    physicalLatencyExcluded: true, // key-press -> CoreAudio open is Aqua's own time, not measured here
+    cycles: cycles ?? 0,
+    validTrials: ts.length,
+    warmupsExcluded: Math.min(warmups, ts.length),
+    measuredTrials: measured.length,
+    invalidCycles: invalid ?? [],
+  };
+  if (measured.length < measuredMinimum) {
+    return { ...base, accepted: false, all_gates_valid: false, invalid_reasons: [...new Set(['insufficient_trials', ...reasons])] };
+  }
+  const rank = values => {
+    const xs = values.filter(Number.isFinite).sort((a, b) => a - b);
+    const p = q => xs[Math.max(0, Math.ceil(q * xs.length) - 1)];
+    return { p50: p(0.5), p95: p(0.95), p99: p(0.99) };
+  };
+  return {
+    ...base,
+    accepted: true,
+    all_gates_valid: true,
+    invalid_reasons: [],
+    percentiles: rank(measured.map(t => t.discord.freshMs)),
+    restorePercentiles: rank(measured.map(t => t.restoreMs)),
+    helperPercentiles: rank(measured.map(t => t.hookStartToHelperMs)),
+  };
+}
+
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   const { readFile, writeFile } = await import('node:fs/promises');
-  const [input, output] = process.argv.slice(2);
+  const [input, output, routeArg] = process.argv.slice(2);
   if (!input || !output) {
-    console.error('usage: frames-to-trials.mjs <observations.jsonl> <trials.jsonl>');
+    console.error('usage: frames-to-trials.mjs <observations.jsonl> <trials.jsonl> [bridge|coreaudio]');
     process.exit(2);
   }
   try {
-    const { trials, cycles, invalid } = convertJsonl(await readFile(input, 'utf8'));
+    const route = routeArg === 'coreaudio' ? 'coreaudio' : 'bridge';
+    const converted = convertJsonl(await readFile(input, 'utf8'), { route });
+    const { trials, cycles, invalid } = converted;
     await writeFile(output, trials.map(t => JSON.stringify(t)).join('\n') + (trials.length ? '\n' : ''));
-    process.stdout.write(JSON.stringify({ cycles, valid: trials.length, invalid }) + '\n');
+    if (route === 'coreaudio') process.stdout.write(JSON.stringify(summarizeShortcutRun(converted)) + '\n');
+    else process.stdout.write(JSON.stringify({ cycles, valid: trials.length, invalid }) + '\n');
   } catch (error) {
     console.error(`convert_error: ${error.message}`);
     process.exit(2);

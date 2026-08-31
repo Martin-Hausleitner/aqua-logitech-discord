@@ -62,7 +62,6 @@ export class StatusState {
         const evidence = { recording, source };
         if (Number.isSafeInteger(metadata?.hookSeq)) evidence.hookSeq = metadata.hookSeq;
         if (typeof metadata?.hookMonoNs === "string" && metadata.hookMonoNs.length > 0) evidence.hookMonoNs = metadata.hookMonoNs;
-        if (source === "coreaudio") evidence.confirmationMonoNs = this.monoNow();
         if (COMMAND_SOURCES.has(source)) {
             this.lastBridgeAt = ts;
             this.lastBridgeRecording = recording;
@@ -71,12 +70,19 @@ export class StatusState {
         }
         if (recording === this.recording) {
             if (source === "coreaudio") {
+                // Agreement, not a transition: this evidence is the hookless
+                // CoreAudio confirmation and carries the confirmation stamp.
+                evidence.confirmationMonoNs = this.monoNow();
                 const changed = JSON.stringify(this.confirmation) !== JSON.stringify(evidence);
                 this.confirmation = evidence;
                 return changed;
             }
             return false;
         }
+        // Same-clock hook reference for every route: the keyboard-shortcut
+        // (coreaudio) path has no bridge hookMonoNs, so the helper's own mach
+        // stamp is the measurable transition anchor.
+        evidence.intentMonoNs = this.monoNow();
         this.recording = recording;
         this.source = source;
         this.intent = evidence;

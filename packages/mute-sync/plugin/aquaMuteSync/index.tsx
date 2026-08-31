@@ -108,6 +108,7 @@ let latestStateIntent: StateEvidence | null = null;
 let latestStateConfirmation: CoreAudioConfirmation | null = null;
 let latestHookSeq: number | null = null;
 let latestBridgeTuple: BridgeStateTuple | null = null;
+let latestStateTuple: BridgeStateTuple | null = null;
 let activeBaselineProvenance: BridgeStateTuple | null = null;
 
 const STATE_FRESH_MS = 1000;
@@ -284,6 +285,26 @@ function currentBridgeTuple(recording?: boolean) {
     return latestBridgeTuple && (recording === undefined || latestBridgeTuple.recording === recording) ? latestBridgeTuple : null;
 }
 
+/** PRODUCT tuple: any consistent transition (bridge, coreaudio hook via the
+ *  keyboard shortcut, degraded poll fallback) may own mute/restore. Only TRIAL
+ *  qualification (qualifyTransition) stays bridge-strict. */
+function stateTupleFromState(message: unknown, receivedMonoMs = performance.now()): BridgeStateTuple | null {
+    if (!message || typeof message !== "object") return null;
+    const state = message as Record<string, unknown>;
+    if (!Number.isSafeInteger(state.seq) || (state.seq as number) < 0) return null;
+    if (state.recording !== true && state.recording !== false) return null;
+    if (typeof state.source !== "string" || state.source.length === 0 || state.source === "init") return null;
+    const intent = state.intent as Record<string, unknown> | null;
+    if (!intent || typeof intent !== "object" || intent.recording !== state.recording || intent.source !== state.source) return null;
+    const hookSeq = Number.isSafeInteger(intent.hookSeq) && (intent.hookSeq as number) >= 0 ? intent.hookSeq as number : -1;
+    const hookMonoNs = typeof intent.hookMonoNs === "string" && /^\d+$/.test(intent.hookMonoNs as string) ? intent.hookMonoNs as string : "";
+    return { stateSeq: state.seq as number, receivedMonoMs, recording: state.recording, source: state.source, hookSeq, hookMonoNs };
+}
+
+function currentStateTuple(recording?: boolean) {
+    return latestStateTuple && (recording === undefined || latestStateTuple.recording === recording) ? latestStateTuple : null;
+}
+
 function handleHelperState(message: unknown) {
     if (!message || typeof message !== "object") return false;
     const state = message as Record<string, unknown>;
@@ -295,6 +316,7 @@ function handleHelperState(message: unknown) {
     latestStateIntent = intent;
     latestHookSeq = intent?.hookSeq ?? null;
     latestBridgeTuple = bridgeTupleFromState(state, receivedMonoMs);
+    latestStateTuple = stateTupleFromState(state, receivedMonoMs);
     latestStateConfirmation = parseCoreAudioConfirmation(state.confirmation, latestStateSeq, state.recording, intent, receivedMonoMs);
     helperDegraded = state.degraded === true;
     helperConnected = true;
@@ -450,7 +472,7 @@ function measureTransition(target: boolean, phase: "mute" | "restore", startedAt
             if (qualifyTransition({ captured, current: currentBridgeTuple(), confirmation: latestStateConfirmation, now: performance.now(), observed, helperConnected, helperDegraded })) {
                 console.info(`[AquaMuteSync] transition-confirmed phase=${phase} latencyMs=${latencyMs} target=${target} stateSeq=${captured?.stateSeq ?? "unknown"} source=${captured?.source ?? "unknown"} hookSeq=${captured?.hookSeq ?? "unknown"}`);
             } else {
-                console.info(`[AquaMuteSync] transition-observed-unqualified phase=${phase} target=${target}`);
+                console.info(`[AquaMuteSync] transition-observed-unqualified phase=${phase} latencyMs=${latencyMs} target=${target} stateSeq=${captured?.stateSeq ?? "unknown"} source=${captured?.source ?? "unknown"}`);
             }
         } else if (latencyMs < TRANSITION_TIMEOUT_MS) {
             transitionMeasureTimer = setTimeout(check, TRANSITION_POLL_MS);
@@ -494,7 +516,7 @@ function captureActualBaseline(cycle: BridgeStateTuple | null, observed = isSelf
 }
 
 function establishRecordingBaseline() {
-    const cycle = currentBridgeTuple(true);
+    const cycle = currentStateTuple(true);
     if (!cycle) {
         clearPersistedBaseline();
         return false;
@@ -518,7 +540,7 @@ function beginRecordingMute() {
     if (!establishRecordingBaseline()) return;
     const startedAt = performance.now();
     setSelfMute(true);
-    measureTransition(true, "mute", startedAt, currentBridgeTuple(true));
+    measureTransition(true, "mute", startedAt, currentStateTuple(true));
 }
 
 function restorePreMute(verifyAfterOneSecond: boolean, operational = false) {
@@ -533,7 +555,7 @@ function restorePreMute(verifyAfterOneSecond: boolean, operational = false) {
     const startedAt = performance.now();
     setSelfMute(target, !operational, operational);
     if (operational) console.info(`[AquaMuteSync] operational-restore-unqualified target=${target}`);
-    else measureTransition(target, "restore", startedAt, currentBridgeTuple(false));
+    else measureTransition(target, "restore", startedAt, currentStateTuple(false));
 
     if (!verifyAfterOneSecond) {
         clearPersistedBaseline();
@@ -610,12 +632,12 @@ function driftCheck() {
     const observed = isSelfMute();
     if (aquaRecording && helperConnected && observed === false) {
         if (!settings.store.ownMute) {
-            if (!captureActualBaseline(currentBridgeTuple(true), observed)) return;
+            if (!captureActualBaseline(currentStateTuple(true), observed)) return;
         } else if (!activeBaselineProvenance) {
             return;
         }
         setSelfMute(true);
-        measureTransition(true, "mute", performance.now(), currentBridgeTuple(true));
+        measureTransition(true, "mute", performance.now(), currentStateTuple(true));
         if (!driftToastShown) {
             driftToastShown = true; // max 1× pro Aufnahme (Tribunal-UX #3)
             try { showToast("🔒 AquaMuteSync: während Aqua-Aufnahme re-gemutet", Toasts.Type.FAILURE); } catch {}
@@ -649,6 +671,7 @@ function connect() {
         lastReportedMute = null;
         lastSeq = -1; // Helper-Neustart setzt seq zurück
         aquaRecording = false;
+        latestStateTuple = null;
         activeBaselineProvenance = null;
         notify();
         // Sicher-Verhalten: gehaltenes Mute NICHT blind lösen — Zustand wird beim
@@ -808,6 +831,7 @@ export default definePlugin({
         latestStateConfirmation = null;
         latestHookSeq = null;
         latestBridgeTuple = null;
+        latestStateTuple = null;
         activeBaselineProvenance = null;
         driftToastShown = false;
         statusClientSeq = 0;
@@ -870,6 +894,7 @@ export default definePlugin({
         latestStateConfirmation = null;
         latestHookSeq = null;
         latestBridgeTuple = null;
+        latestStateTuple = null;
         ws?.close();
     }
 });

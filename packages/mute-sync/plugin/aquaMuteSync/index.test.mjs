@@ -77,6 +77,20 @@ function bridgeState({ seq, recording, hookSeq, hookMonoNs, degraded = false, co
     };
 }
 
+/** Keyboard-shortcut route: aqua-mic-watch CoreAudio transition, no bridge hook. */
+function coreaudioState({ seq, recording, degraded = false, intentMonoNs = "123456789" }) {
+    return {
+        v: 1,
+        type: "state",
+        seq,
+        recording,
+        source: "coreaudio",
+        degraded,
+        intent: { recording, source: "coreaudio", intentMonoNs },
+        confirmation: null
+    };
+}
+
 function functionBody(name) {
     const start = source.indexOf(`function ${name}`);
     assert.notEqual(start, -1, `expected ${name} to exist`);
@@ -127,6 +141,54 @@ test("persists an accessible sync toggle with an enabled-by-default setting", ()
     assert.match(source, /aria-label=\{`AquaMuteSync \$\{syncEnabled \? "AN" : "AUS"\}`\}/);
     assert.match(source, /syncEnabled = settings\.store\.autoSync === true/);
     assert.match(source, /Only an explicit persisted boolean enables automatic writers/);
+});
+
+test("executes the keyboard-shortcut route: a coreaudio recording start mutes with an actual baseline", async () => {
+    const fixture = button("Mute", "false");
+    const { aqua } = await loadActual({ buttons: [fixture] });
+    aqua.getTestApi().handleHelperState(coreaudioState({ seq: 5, recording: true }));
+    assert.equal(fixture.clicks, 1, "mute writer must fire for the shortcut route");
+    const settings = aqua.getSettings();
+    assert.equal(settings.ownMute, true);
+    assert.equal(settings.preMute, false);
+    assert.equal(settings.preMuteKnown, true);
+    assert.equal(settings.baselineSource, "coreaudio");
+    assert.equal(settings.baselineStateSeq, 5);
+    assert.equal(settings.baselineHookSeq, -1);
+});
+
+test("executes the keyboard-shortcut route: stop restores the captured baseline and releases ownership", async () => {
+    const fixture = button("Mute", "false");
+    const { aqua, runTimers } = await loadActual({ buttons: [fixture] });
+    const api = aqua.getTestApi();
+    api.handleHelperState(coreaudioState({ seq: 5, recording: true }));
+    assert.equal(aqua.getSettings().ownMute, true);
+    api.handleHelperState(coreaudioState({ seq: 6, recording: false }));
+    runTimers();
+    assert.equal(aqua.getSettings().ownMute, false);
+    assert.equal(aqua.getSettings().preMuteKnown, false);
+});
+
+test("executes the degraded poll fallback route: recording still mutes", async () => {
+    const fixture = button("Mute", "false");
+    const { aqua } = await loadActual({ buttons: [fixture] });
+    aqua.getTestApi().handleHelperState({
+        v: 1, type: "state", seq: 3, recording: true, source: "poll:mic_timings", degraded: true,
+        intent: { recording: true, source: "poll:mic_timings", intentMonoNs: "42" }, confirmation: null
+    });
+    assert.equal(fixture.clicks, 1);
+    assert.equal(aqua.getSettings().baselineSource, "poll:mic_timings");
+});
+
+test("keeps trial qualification bridge-strict: shortcut transitions log observed-unqualified, never transition-confirmed", async () => {
+    const fixture = button("Mute", "false");
+    const { aqua, logs, runTimers } = await loadActual({ buttons: [fixture] });
+    const api = aqua.getTestApi();
+    api.handleHelperState(coreaudioState({ seq: 5, recording: true }));
+    fixture.setChecked("true");
+    runTimers();
+    assert.equal(logs.some(([, message]) => message.includes("transition-confirmed")), false);
+    assert.equal(logs.some(([, message]) => message.includes("transition-observed-unqualified") && message.includes("source=coreaudio") && message.includes("latencyMs=")), true);
 });
 
 test("the override key never collides with Vencord's plugin-enable flag", () => {
