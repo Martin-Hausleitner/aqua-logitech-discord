@@ -22,17 +22,18 @@ export function createHidSemanticDecoder({ debounceMs = 30, semanticMasks = {} }
     const bytes = bytesOf(frame); if (!bytes) return null;
     const source = frame.sourceId ?? stableSourceIdentity(frame);
     const key = source;
-    let s = state.get(key); if (!s) { s = { prev: null, edges: new Map(), lastSemantic: new Map() }; state.set(key, s); }
+    let s = state.get(key); if (!s) { s = { prev: null, edges: new Map(), lastSemantic: new Map(), reports: 0 }; state.set(key, s); }
     const hex = Buffer.from(bytes).toString('hex');
     const prevHex = s.prev?.hex ?? null;
     const edge = prevHex === null ? null : `${prevHex}>${hex}`;
     s.prev = { hex, bytes, at: now };
+    s.reports++;
     if (!edge) return { source, at: now, reportLength: bytes.length, delta: null, background: true, semantic: null };
     const seen = (s.edges.get(edge) ?? 0) + 1; s.edges.set(edge, seen);
     const delta = { from: prevHex, to: hex, changedBytes: bytes.map((b, i) => (s.prev.bytes[i] ?? 0) ^ b) };
     const mask = bytes.length === 1 ? bytes[0] : null;
     const semantic = semanticMasks[`${prevHex}>${hex}`] ?? semanticMasks[mask];
-    const background = seen >= 2;
+    const background = seen >= 2 || s.reports >= 5;
     let accepted = null;
     if (semantic && !background && now - (s.lastSemantic.get(semantic) ?? -Infinity) >= debounceMs) { accepted = semantic; s.lastSemantic.set(semantic, now); }
     return { source, at: now, reportLength: bytes.length, delta, background, semantic: accepted };
