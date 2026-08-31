@@ -1,51 +1,80 @@
 #!/bin/sh
-# N281: Plugin in den Vencord-Source-Tree syncen, bauen und die gebaute dist
-# in die installierte Vencord-Instanz kopieren. Discord danach neu starten.
-# Tribunal-Fixes (verdict-ops.md): Deploy-Verify + Autopatcher-Warnung.
+# Multi-Plugin Deploy (AquaMuteSync + AutoStream + StreamPiP + HoerbertRecorder)
 set -eu
-
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="${AQUA_MUTE_REPO:-$HOME/code/aqua-logitech-discord/packages/mute-sync}"
-# Prefer existing checkouts (machine has ~/Vencord; older docs used ~/src/Vencord)
-if [ -d "$HOME/Vencord/src" ]; then
+
+if [ -d "$HOME/code/vencord-auto-stream/src" ]; then
+  VENCORD_SRC="$HOME/code/vencord-auto-stream"
+elif [ -d "$HOME/Vencord/src" ]; then
   VENCORD_SRC="$HOME/Vencord"
 elif [ -d "$HOME/src/Vencord/src" ]; then
   VENCORD_SRC="$HOME/src/Vencord"
 else
-  echo "FEHLER: kein Vencord-Checkout unter ~/Vencord oder ~/src/Vencord" >&2
+  echo "FEHLER: kein Vencord-Checkout gefunden!" >&2
   exit 1
 fi
-VENCORD_DIST="$HOME/Library/Application Support/Vencord/dist"
+
+VENCORD_DIST_LINK="$HOME/Library/Application Support/Vencord/dist"
+FILES="patcher.js preload.js renderer.js renderer.css vencordDesktopMain.js vencordDesktopPreload.js vencordDesktopRenderer.js vencordDesktopRenderer.css"
+PLUGINS="AquaMuteSync AutoStream"
+
+resolve() { python3 -c "import os,sys;print(os.path.realpath(sys.argv[1]))" "$1"; }
+
+DIST_REAL="$(resolve "$VENCORD_DIST_LINK")"
+echo "==> Ziel (real): $DIST_REAL"
+if [ ! -d "$DIST_REAL" ]; then
+  echo "FEHLER: aufgelöste dist existiert nicht: $DIST_REAL" >&2
+  exit 1
+fi
 
 echo "==> sync plugin"
-rm -rf "$VENCORD_SRC/src/userplugins/aquaMuteSync"
 mkdir -p "$VENCORD_SRC/src/userplugins"
+rm -rf "$VENCORD_SRC/src/userplugins/aquaMuteSync"
 cp -R "$REPO/plugin/aquaMuteSync" "$VENCORD_SRC/src/userplugins/aquaMuteSync"
 
 echo "==> build"
 cd "$VENCORD_SRC"
 pnpm build
 
-echo "==> backup + deploy dist"
-if [ ! -d "$VENCORD_DIST.stock" ]; then
-  cp -R "$VENCORD_DIST" "$VENCORD_DIST.stock"   # einmaliges Backup der Stock-dist
-fi
-for f in patcher.js preload.js renderer.js renderer.css; do
-  cp "$VENCORD_SRC/dist/$f" "$VENCORD_DIST/$f"
+echo "==> verify BUILD-dist"
+for p in $PLUGINS; do
+  grep -q "$p" "$VENCORD_SRC/dist/renderer.js" \
+    || { echo "FEHLER: $p fehlt in der GEBAUTEN renderer.js!" >&2; exit 1; }
 done
 
-echo "==> verify"
-if ! grep -q "AquaMuteSync" "$VENCORD_DIST/renderer.js"; then
-  echo "FEHLER: AquaMuteSync fehlt in deployter renderer.js!" >&2
-  exit 1
-fi
-echo "OK: AquaMuteSync in renderer.js enthalten."
+echo "==> dist.prev-Rotation"
+PREV="$DIST_REAL.prev"
+rm -rf "$PREV"
+mkdir -p "$PREV"
+for f in $FILES; do
+  [ -f "$DIST_REAL/$f" ] && cp "$DIST_REAL/$f" "$PREV/$f"
+done
 
-# BetterVencordPatch-Autopatcher kann die dist bei Discord-Updates mit Stock
-# überschreiben und das Plugin still entfernen (verdict-ops.md #1).
-if launchctl list 2>/dev/null | grep -q "org.aaron.autovencordpatch"; then
-  echo "⚠️  WARNUNG: org.aaron.autovencordpatch läuft (KeepAlive)."
-  echo "   Nach jedem Discord-Update prüfen: grep -c AquaMuteSync \"$VENCORD_DIST/renderer.js\""
-  echo "   Wenn 0 → dieses Skript erneut ausführen."
-fi
+echo "==> staged deploy"
+for f in $FILES; do
+  if [ -f "$VENCORD_SRC/dist/$f" ]; then
+    cp "$VENCORD_SRC/dist/$f" "$DIST_REAL/$f.tmp"
+    mv "$DIST_REAL/$f.tmp" "$DIST_REAL/$f"
+  fi
+done
 
-echo "==> done. Discord neu starten, damit die neue dist lädt."
+echo "==> sync to all Vesktop and Vencord targets"
+TARGETS="$DIST_REAL $HOME/Vencord/dist $HOME/Library/Application\ Support/vesktop/sessionData/vencordFiles"
+for target in $TARGETS; do
+  if [ -d "$target" ] && [ "$target" != "$DIST_REAL" ]; then
+    echo "==> syncing to $target"
+    for f in $FILES; do
+      [ -f "$DIST_REAL/$f" ] && cp "$DIST_REAL/$f" "$target/$f"
+    done
+  fi
+done
+
+echo "==> verify deployte dist"
+for p in $PLUGINS; do
+  grep -q "$p" "$DIST_REAL/renderer.js" \
+    || { echo "FEHLER: $p fehlt in der DEPLOYTEN renderer.js!" >&2; exit 1; }
+  echo "OK: $p in deployter renderer.js."
+done
+
+echo "==> done. Discord / Vesktop neu starten, damit die neue dist lädt."

@@ -5,6 +5,7 @@ LABEL=org.aqua.hook-benchmark
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$HOME/Library/Logs/aqua-hook-benchmark-observer.log"
 OUT="$HOME/Library/Logs/aqua-hook-benchmark.jsonl"
+RECEIPT="$HOME/Library/Logs/aqua-hook-benchmark-observer.receipt"
 NODE=$(command -v node)
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
 chmod 700 "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
@@ -22,4 +23,6 @@ plutil -lint "$PLIST" >/dev/null
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 launchctl enable "gui/$(id -u)/$LABEL"
-echo "installed $LABEL source=$REPO/packages/benchmark/observe.mjs"
+printf 'label=%s\nsource=%s\nplist=%s\ninstalled_at=%s\n' "$LABEL" "$REPO/packages/benchmark/observe.mjs" "$PLIST" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RECEIPT"
+chmod 600 "$RECEIPT"
+echo "installed $LABEL source=$REPO/packages/benchmark/observe.mjs receipt=$RECEIPT"

@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createMachine, reduce, Mode } from "./state-machine.mjs";
-
 test("button1 toggle start then stop → settle+enter", () => {
   let s = createMachine();
   let r = reduce(s, { type: "BUTTON1_TAP", at: 1 });
@@ -36,4 +35,32 @@ test("button1 ignored during PTT hold", () => {
   r = reduce(r.state, { type: "BUTTON1_TAP" });
   assert.equal(r.state.mode, Mode.PTT_HOLDING);
   assert.deepEqual(r.actions, []);
+});
+
+test("SHORTCUT_LEFT on recording triggers WAIT_SETTLE and ENTER_NONE", () => {
+  let s = createMachine();
+  let r = reduce(s, { type: "BUTTON1_TAP" });
+  assert.equal(r.state.mode, Mode.TOGGLE_RECORDING);
+  r = reduce(r.state, { type: "SHORTCUT_LEFT" });
+  assert.equal(r.state.mode, Mode.WAITING_SETTLE);
+  assert.deepEqual(r.actions, ["TOGGLE_STOP", "WAIT_SETTLE", "ENTER_NONE"]);
+});
+
+test("SHORTCUT_RIGHT on recording triggers WAIT_SETTLE and ENTER_FORCE", () => {
+  let s = createMachine();
+  let r = reduce(s, { type: "BUTTON1_TAP" });
+  assert.equal(r.state.mode, Mode.TOGGLE_RECORDING);
+  r = reduce(r.state, { type: "SHORTCUT_RIGHT" });
+  assert.equal(r.state.mode, Mode.WAITING_SETTLE);
+  assert.deepEqual(r.actions, ["TOGGLE_STOP", "WAIT_SETTLE", "ENTER_FORCE"]);
+});
+
+test("CANCEL resets machine to IDLE and clears pending PTT state", () => {
+  let s = createMachine();
+  let r = reduce(s, { type: "BUTTON2_DOWN" });
+  assert.equal(r.state.mode, Mode.PTT_HOLDING);
+  r = reduce(r.state, { type: "CANCEL" });
+  assert.equal(r.state.mode, Mode.IDLE);
+  assert.equal(r.state.pendingEnterAfterPtt, false);
+  assert.deepEqual(r.actions, ["PTT_UP"]);
 });

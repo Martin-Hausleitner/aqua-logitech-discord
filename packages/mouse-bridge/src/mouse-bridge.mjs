@@ -19,10 +19,12 @@
  */
 
 import { createServer } from "node:http";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, execFileSync, execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+const execFileAsync = promisify(execFile);
 import { createMachine, reduce } from "./state-machine.mjs";
 import { snapshotSignals, waitUntilSettled } from "./settle.mjs";
 
@@ -42,7 +44,7 @@ let busy = false;
 let aquaRecording = false;
 let watchWs = null;
 
-function hid(...args) {
+async function hid(...args) {
   if (DRY) {
     log("DRY hid-tap", ...args);
     return;
@@ -50,7 +52,7 @@ function hid(...args) {
   if (!existsSync(HID)) {
     throw new Error(`hid-tap missing — run scripts/build-hid.sh (expected ${HID})`);
   }
-  execFileSync(HID, args, { stdio: "inherit" });
+  await execFileAsync(HID, args, { stdio: "inherit" });
 }
 
 function connectWatch() {
@@ -84,47 +86,183 @@ function connectWatch() {
   }
 }
 
+const AUTO_ENTER_APPS = (process.env.AQUA_AUTO_ENTER_APPS || "cursor,chatgpt,claude,vesktop,discord,slack,telegram,linear")
+  .split(",")
+  .map(s => s.trim().toLowerCase())
+  .filter(Boolean);
+
+const AUTO_ENTER_TITLES = (process.env.AQUA_AUTO_ENTER_TITLES || "chatgpt,claude,discord,slack")
+  .split(",")
+  .map(s => s.trim().toLowerCase())
+  .filter(Boolean);
+
+const BROWSER_APPS = ["comet", "chrome", "brave", "safari", "arc", "edge", "firefox"];
+
+const metrics = {
+  startTime: Date.now(),
+  totalToggles: 0,
+  totalPtt: 0,
+  settleCount: 0,
+  timeoutCount: 0,
+  lastLatencyMs: 0,
+  totalLatencyMs: 0,
+  avgLatencyMs: 0,
+};
+
+async function getActiveWindow() {
+  try {
+    const { stdout: appOut } = await execFileAsync("osascript", ["-e", 'tell application "System Events" to get name of first application process whose frontmost is true']);
+    const app = appOut.toString().trim();
+    let title = "";
+    try {
+      const { stdout: titleOut } = await execFileAsync("osascript", ["-e", 'tell application "System Events" to get name of window 1 of (first application process whose frontmost is true)']);
+      title = titleOut.toString().trim();
+    } catch { /* ignore */ }
+    return { app, title };
+  } catch (e) {
+    return { app: "", title: "" };
+  }
+}
+
+async function shouldAutoEnter() {
+  const { app, title } = await getActiveWindow();
+  if (!app) return { doEnter: false, app, title }; // fail closed if accessibility lookup fails
+
+  const a = app.toLowerCase();
+  const t = title.toLowerCase();
+
+  let doEnter = false;
+  if (AUTO_ENTER_APPS.some(target => a.includes(target))) {
+    doEnter = true;
+  } else if (BROWSER_APPS.some(browser => a.includes(browser))) {
+    if (AUTO_ENTER_TITLES.some(target => t.includes(target))) doEnter = true;
+  }
+
+  return { doEnter, app, title };
+}
+
+let currentSettleAbort = null;
+let pendingRestart = false;
+
+/** Same physical click as Aqua toggle: Discord mute via aqua-watch, not CoreAudio poll. */
+let hookSeq = 0;
+const SHORTCUT_ENDPOINTS_ENABLED = /^(1|true)$/i.test(process.env.AQUA_SHORTCUT_ENDPOINTS_ENABLED || "");
+
+function notifySameButton(recording) {
+  const rec = !!recording;
+  if (!watchWs || watchWs.readyState !== 1) {
+    log("same-button skipped — aqua-watch not linked", `recording=${rec}`);
+    return;
+  }
+  try {
+    // The state broadcast is the canonical AquaMuteSync trigger. Do not send a
+    // second toggle frame: that would create a duplicate mute writer.
+    hookSeq += 1;
+    watchWs.send(JSON.stringify({ type: "set_recording", recording: rec, source: "bridge", hookSeq, hookMonoNs: process.hrtime.bigint().toString() }));
+    log("same-button", rec ? "mute" : "restore");
+  } catch (e) {
+    log("same-button send failed", e.message);
+  }
+}
+
+function readClipboard() {
+  try {
+    return execFileSync("pbpaste", {
+      encoding: "utf8",
+      timeout: 200,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch {
+    return "";
+  }
+}
+
 async function runActions(actions) {
+  let skipEnter = false;
   for (const a of actions) {
     switch (a) {
       case "TOGGLE_START":
         log(a, `mode=${TOGGLE_MODE}`);
-        if (TOGGLE_MODE === "f19") hid(process.env.AQUA_LOCK_HID ?? "f19");
-        else hid("fn-down");
+        notifySameButton(true);
+        if (TOGGLE_MODE === "f19") await hid(process.env.AQUA_LOCK_HID ?? "f19");
+        else await hid("fn-down");
         break;
       case "TOGGLE_STOP":
         log(a, `mode=${TOGGLE_MODE}`);
-        if (TOGGLE_MODE === "f19") hid(process.env.AQUA_LOCK_HID ?? "f19");
-        else hid("fn-up");
+        notifySameButton(false);
+        if (TOGGLE_MODE === "f19") await hid(process.env.AQUA_LOCK_HID ?? "f19");
+        else await hid("fn-up");
         break;
       case "PTT_DOWN":
         log(a);
-        hid("fn-down");
+        notifySameButton(true);
+        await hid("fn-down");
         break;
       case "PTT_UP":
         log(a);
-        hid("fn-up");
+        notifySameButton(false);
+        await hid("fn-up");
         break;
       case "WAIT_SETTLE": {
         log(a);
+        if (DRY) {
+          log("DRY WAIT_SETTLE — skipping actual wait");
+          break;
+        }
+        currentSettleAbort = new AbortController();
         const settle = await waitUntilSettled({
           isRecording: () => aquaRecording,
           readSignals: () => snapshotSignals(),
-          // Prefer history.json new transcription ts — wav/quiet are too early.
+          readClipboard,
+          signal: currentSettleAbort.signal,
+          maxWaitMs: Number(process.env.AQUA_SETTLE_TIMEOUT_MS ?? 6000),
+          pollMs: 15,
+          minAfterStopMs: 25,
+          postTranscriptMs: 60,
           log: (m) => log(m),
         });
+        currentSettleAbort = null;
+
+        metrics.settleCount++;
+        metrics.lastLatencyMs = settle.waitedMs;
+        metrics.totalLatencyMs += settle.waitedMs;
+        metrics.avgLatencyMs = Math.round(metrics.totalLatencyMs / metrics.settleCount);
+
         if (!settle.ok) {
-          log(`settle FAILED (${settle.reason}) — skipping ENTER to avoid empty send`);
-          machine = reduce(machine, { type: "SETTLE_DONE" }).state;
-          return; // abort remaining actions (including ENTER)
+          metrics.timeoutCount++;
+          log(`settle FAILED (${settle.reason}) — skipping Enter to avoid empty/stuck dispatch`);
+          skipEnter = true;
         }
         break;
       }
       case "ENTER":
+      case "ENTER_FORCE":
+      case "ENTER_NONE": {
         log(a);
-        hid("enter");
+        if (skipEnter) {
+          log(`Skipping ${a} because settle did not complete successfully`);
+          machine = reduce(machine, { type: "SETTLE_DONE" }).state;
+          break;
+        }
+
+        let doEnter = false;
+        if (a === "ENTER_FORCE") {
+          doEnter = true;
+          log(`Smart Submit: OVERRIDE (Right Button) -> Auto-Enter=true`);
+        } else if (a === "ENTER_NONE") {
+          doEnter = false;
+          log(`Smart Submit: OVERRIDE (Left Button) -> Auto-Enter=false`);
+        } else {
+          const { doEnter: smartEnter, app, title } = await shouldAutoEnter();
+          doEnter = smartEnter;
+          log(`Smart Submit: Active=${app} (Title=${title}) -> Auto-Enter=${doEnter}`);
+        }
+        if (doEnter) {
+          await hid("enter");
+        }
         machine = reduce(machine, { type: "SETTLE_DONE" }).state;
         break;
+      }
       default:
         log("unknown action", a);
     }
@@ -132,7 +270,27 @@ async function runActions(actions) {
 }
 
 async function handleEvent(type) {
-  if (busy && (type === "BUTTON1_TAP" || type.startsWith("BUTTON2"))) {
+  if (type === "BUTTON1_TAP" || type.startsWith("SHORTCUT")) metrics.totalToggles++;
+  if (type.startsWith("BUTTON2")) metrics.totalPtt++;
+
+  if (type === "CANCEL") {
+    pendingRestart = false;
+    if (currentSettleAbort) {
+      currentSettleAbort.abort();
+      currentSettleAbort = null;
+    }
+    busy = false;
+  }
+
+  if (busy && (type === "BUTTON1_TAP" || type.startsWith("SHORTCUT"))) {
+    // Fast second press: abort 6s settle and queue a fresh toggle instead of wrap.
+    pendingRestart = true;
+    if (currentSettleAbort) currentSettleAbort.abort();
+    log("busy — abort settle, queue restart", type);
+    return { ok: true, reason: "queued_restart", state: machine };
+  }
+
+  if (busy && type.startsWith("BUTTON2")) {
     // Allow BUTTON2_UP even if busy so Fn never sticks
     if (type !== "BUTTON2_UP") {
       log("busy — ignore", type);
@@ -143,13 +301,20 @@ async function handleEvent(type) {
   machine = state;
   if (!actions.length) return { ok: true, state: machine, actions };
 
-  const needsWait = actions.includes("WAIT_SETTLE") || actions.includes("ENTER");
+  const needsWait = actions.includes("WAIT_SETTLE") || actions.includes("ENTER") || actions.includes("ENTER_FORCE") || actions.includes("ENTER_NONE");
   if (needsWait) {
     busy = true;
     try {
       await runActions(actions);
     } finally {
       busy = false;
+      currentSettleAbort = null;
+    }
+    if (pendingRestart) {
+      pendingRestart = false;
+      machine = reduce(machine, { type: "SETTLE_DONE" }).state;
+      log("queued restart — BUTTON1_TAP");
+      return await handleEvent("BUTTON1_TAP");
     }
   } else {
     await runActions(actions);
@@ -171,6 +336,15 @@ const server = createServer(async (req, res) => {
       aquaRecording,
       watchLinked: !!watchWs && watchWs.readyState === 1,
       dry: DRY,
+      metrics: {
+        ...metrics,
+        uptimeSec: Math.round((Date.now() - metrics.startTime) / 1000),
+      },
+      config: {
+        toggleMode: TOGGLE_MODE,
+        autoEnterApps: AUTO_ENTER_APPS,
+        autoEnterTitles: AUTO_ENTER_TITLES,
+      },
     });
   }
   if (req.method === "POST" || req.method === "GET") {
@@ -178,9 +352,14 @@ const server = createServer(async (req, res) => {
       "/button1": "BUTTON1_TAP",
       "/button2/down": "BUTTON2_DOWN",
       "/button2/up": "BUTTON2_UP",
+      "/shortcut/left": "SHORTCUT_LEFT",
+      "/shortcut/right": "SHORTCUT_RIGHT",
       "/cancel": "CANCEL",
     };
-    const ev = map[url.pathname];
+ const ev = map[url.pathname];
+  if (ev && ev.startsWith("SHORTCUT") && !SHORTCUT_ENDPOINTS_ENABLED) {
+    return json(res, 410, { ok: false, error: "shortcut endpoints disabled; use /button1" });
+  }
     if (ev) {
       try {
         const out = await handleEvent(ev);

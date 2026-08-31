@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { waitUntilSettled } from "./settle.mjs";
-
 test("settle waits for history_ts — not wav/quiet", async () => {
   let recording = true;
   let historyTs = "2026-07-24T10:00:00.000Z";
@@ -102,4 +101,48 @@ test("clipboard can complete settle", async () => {
   const result = await p;
   assert.equal(result.ok, true);
   assert.equal(result.reason, "clipboard");
+});
+
+test("low-latency fast settle completes within 100ms of transcript", async () => {
+  let recording = true;
+  let historyTs = "2026-08-29T00:00:00.000Z";
+  const p = waitUntilSettled({
+    isRecording: () => recording,
+    readSignals: () => ({ wavMtime: 1, historyMtime: 1, historyTs }),
+    minAfterStopMs: 15,
+    postTranscriptMs: 25,
+    maxWaitMs: 3000,
+    pollMs: 10,
+  });
+  setTimeout(() => {
+    recording = false;
+  }, 20);
+  setTimeout(() => {
+    historyTs = "2026-08-29T00:00:01.000Z";
+  }, 40);
+  const result = await p;
+  assert.equal(result.ok, true);
+  assert.equal(result.reason, "history_ts");
+  assert.ok(result.waitedMs < 120, `Expected latency < 120ms, got ${result.waitedMs}ms`);
+});
+
+test("abort signal cancels settle immediately without waiting for timeout", async () => {
+  let recording = true;
+  const ac = new AbortController();
+  const t0 = Date.now();
+  const p = waitUntilSettled({
+    isRecording: () => recording,
+    readSignals: () => ({ wavMtime: 1, historyMtime: 1, historyTs: "same" }),
+    signal: ac.signal,
+    maxWaitMs: 10000,
+    pollMs: 15,
+  });
+  setTimeout(() => {
+    ac.abort();
+  }, 30);
+  const result = await p;
+  const elapsed = Date.now() - t0;
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "aborted");
+  assert.ok(elapsed < 150, `Expected abort in <150ms, took ${elapsed}ms`);
 });
