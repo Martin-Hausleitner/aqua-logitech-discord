@@ -1,13 +1,13 @@
-const TOP=new Set(['observerDate','observerMonoNs','observerSeq','stateSeq','appStateSeq','recording','source','degraded','intent','confirmation','discord']);
-const INTENT=new Set(['recording','source','hookSeq','hookMonoNs']),CONF=new Set(['recording','source']),DISC=new Set(['muted','online','stateSeq','clientMonoMs']);
+const TOP=new Set(['observerDate','observerMonoNs','observerSeq','stateSeq','appStateSeq','recording','source','degraded','intent','confirmation','discord','controlRelays']);
+const INTENT=new Set(['recording','source','hookSeq','hookMonoNs']),CONF=new Set(['recording','source','confirmationMonoNs']),DISC=new Set(['muted','online','stateSeq','clientMonoMs']);
 const obj=v=>v&&typeof v==='object'&&!Array.isArray(v), digits=v=>typeof v==='string'&&/^\d+$/.test(v);
 const fields=(v,s,n)=>{if(!obj(v))throw Error(n+' must be object');for(const k of Object.keys(v))if(!s.has(k))throw Error('unknown '+n+' field '+k)};
 export function parseJsonl(input){
  const lines=Array.isArray(input)?input:typeof input==='string'?input.split(/\r?\n/):(()=>{throw Error('input must be string or array')})();
  return lines.filter(x=>typeof x==='string'&&x.trim()).map((raw,i)=>{let f;try{f=JSON.parse(raw)}catch{throw Error('malformed JSON at line '+(i+1))} fields(f,TOP,'top');
-  if(!Number.isInteger(f.observerDate)||!Number.isInteger(f.observerSeq)||f.observerSeq<0||!Number.isInteger(f.stateSeq)||f.stateSeq<0||('appStateSeq'in f&&(!Number.isInteger(f.appStateSeq)||f.appStateSeq<0))||!digits(f.observerMonoNs)||typeof f.recording!=='boolean'||typeof f.source!=='string'||typeof f.degraded!=='boolean')throw Error('invalid frame');
+  if(!Number.isInteger(f.observerDate)||!Number.isInteger(f.observerSeq)||f.observerSeq<0||!Number.isInteger(f.stateSeq)||f.stateSeq<0||('appStateSeq'in f&&(!Number.isInteger(f.appStateSeq)||f.appStateSeq<0))||('controlRelays'in f&&f.controlRelays!==undefined&&(!Number.isInteger(f.controlRelays)||f.controlRelays<0))||!digits(f.observerMonoNs)||typeof f.recording!=='boolean'||typeof f.source!=='string'||typeof f.degraded!=='boolean')throw Error('invalid frame');
   if(f.intent!==null){fields(f.intent,INTENT,'intent');if(typeof f.intent.recording!=='boolean'||typeof f.intent.source!=='string'||false)throw Error('invalid intent')}
-  if(f.confirmation!==null&&f.confirmation!==undefined){fields(f.confirmation,CONF,'confirmation');if(typeof f.confirmation.recording!=='boolean'||f.confirmation.source!=='coreaudio')throw Error('invalid confirmation')}
+  if(f.confirmation!==null&&f.confirmation!==undefined){fields(f.confirmation,CONF,'confirmation');if(typeof f.confirmation.recording!=='boolean'||f.confirmation.source!=='coreaudio'||('confirmationMonoNs'in f.confirmation&&!digits(f.confirmation.confirmationMonoNs)))throw Error('invalid confirmation')}
   fields(f.discord,DISC,'discord');if(typeof f.discord.online!=='boolean'||(typeof f.discord.muted!=='boolean'&&f.discord.muted!==null)||('stateSeq'in f.discord&&(!Number.isInteger(f.discord.stateSeq)||f.discord.stateSeq<0))||('clientMonoMs'in f.discord&&(typeof f.discord.clientMonoMs!=='number'||!Number.isFinite(f.discord.clientMonoMs))))throw Error('invalid discord');return f})}
 export function analyzeCycles(frames,{warmups=5,measuredMinimum=20}={}){
  const rej=reason=>({accepted:false,status:'rejected',reason,lifecycleCycles:0,hookQualified:0,warmupsExcluded:0,measuredCycles:0});if(!Array.isArray(frames)||!frames.length)return rej('no frames');

@@ -5,6 +5,7 @@ node_modules/
 packages/mute-sync/helper/aqua-mic-watch
 packages/mouse-bridge/bin/
 packages/exporter/aqua_voice_export/
+aqua_voice_export/
 packages/exporter/.venv/
 __pycache__/
 .proof/

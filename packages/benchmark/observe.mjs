@@ -11,6 +11,7 @@ export function serializeStateFrame(frame, { seq = 0, observerDate = Date.now(),
     recording: Boolean(frame?.recording ?? state.recording), source: frame?.source ?? state.source,
     degraded: Boolean(frame?.degraded ?? state.degraded), intent: frame?.intent ?? state.intent,
     confirmation: frame?.confirmation ?? state.confirmation,
+    controlRelays: frame?.controlRelays ?? state.controlRelays,
     discord: { muted: discord.muted, online: discord.online, stateSeq: discord.stateSeq, clientMonoMs: discord.clientMonoMs },
   };
 }
