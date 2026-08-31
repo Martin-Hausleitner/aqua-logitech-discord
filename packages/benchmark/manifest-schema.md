@@ -11,3 +11,9 @@ Stable `invalid_reasons` are: `missing_field`, `route_mismatch`,
 `insufficient_trials`, `physical_latency_included`, `seq_mismatch`,
 `clock_mismatch`, `confirmation_mismatch`, `discord_not_actual`, `stale`,
 `cache_override`, `degraded`, `timeout`, and `restore_missing`.
+
+For bounded physical capture, run `node capture-physical-run.mjs <observations.jsonl>
+<manifest.json>`. Every observation must carry `evidence` values `hook: "real"`,
+`helper: "real"`, `coreaudio: "real"`, and `discord: "actual"`; synthetic or cache
+markers are rejected and no output is written. This command records evidence only;
+it does not drive hardware or Discord.

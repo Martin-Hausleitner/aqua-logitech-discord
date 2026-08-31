@@ -2,6 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseJsonl, analyzeCycles, validateRunManifest, validateManifestTrial, summarizeManifestTrials } from "./jsonl-cycles.mjs";
 import { serializeStateFrame } from "./observe.mjs";
+import { acceptedManifest, rejectedManifest } from "./fixtures.mjs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 const line = ({observerSeq=0,stateSeq=0,monoNs=2_000_000_000,recording=false,appStateSeq=undefined,source="coreaudio",degraded=false,intent=null,confirmation=null,muted=false,online=true,discordStateSeq=stateSeq,clientMonoMs=1_000}={}) => JSON.stringify({observerDate:1_700_000_000_000,observerMonoNs:String(monoNs),observerSeq,stateSeq,appStateSeq,recording,source,degraded,intent,confirmation,discord:{muted,online,stateSeq:discordStateSeq,clientMonoMs}});
 const cycle=(i=0,base=false)=>{const os=i*5,ss=10_000+os,ns=2_000_000_000+os*1_000_000;return [line({observerSeq:os,stateSeq:ss,monoNs:ns,muted:base}),line({observerSeq:os+1,stateSeq:ss+1,monoNs:ns+1_000_000,recording:true,source:"bridge",intent:{recording:true,source:"bridge",hookSeq:os+1,hookMonoNs:String(ns)},muted:base}),line({observerSeq:os+2,stateSeq:ss+2,monoNs:ns+2_000_000,recording:true,muted:true}),line({observerSeq:os+3,stateSeq:ss+3,monoNs:ns+3_000_000,source:"bridge",intent:{recording:false,source:"bridge",hookSeq:os+3,hookMonoNs:String(ns+2_000_000)},muted:true}),line({observerSeq:os+4,stateSeq:ss+4,monoNs:ns+4_000_000,muted:base})]};
 const analyze=xs=>analyzeCycles(parseJsonl(xs.join("\n")));
@@ -41,4 +46,33 @@ test("manifest aggregate excludes five warmups and reports p50/p95/p99",()=>{
 test("manifest aggregate remains fail-closed for restore and disconnect vectors",()=>{
   const ts=Array.from({length:25},(_,i)=>manifestTrial(i)); ts[6].restore=false; ts[7].disconnected=true;
   const s=summarizeManifestTrials(ts); assert.equal(s.accepted,false); assert.ok(s.invalid_reasons.includes("insufficient_trials"));
+});
+test("representative fixtures cover accepted/rejected manifests and every stable reason",()=>{
+  assert.equal(validateRunManifest(acceptedManifest()).invalid_reasons.length,0);
+  const rejected=validateRunManifest(rejectedManifest());
+  assert.equal(rejected.valid,false);
+  for (const reason of ["missing_field","route_mismatch","insufficient_trials","physical_latency_included","seq_mismatch","clock_mismatch","confirmation_mismatch","discord_not_actual","stale","cache_override","degraded","timeout","restore_missing"]) {
+    const m=acceptedManifest();
+    if (reason==='missing_field') delete m.sourceIdentity;
+    else if (reason==='route_mismatch') m.route='wrong';
+    else if (reason==='insufficient_trials') m.trials=m.trials.slice(0,2);
+    else if (reason==='physical_latency_included') m.physicalLatencyExcluded=false;
+    else { const t=m.trials[0]; if(reason==='seq_mismatch') t.hook.hookSeq=-1; if(reason==='clock_mismatch') t.hook.hookMonoNs='x'; if(reason==='confirmation_mismatch') t.confirmation.stateSeq=999; if(reason==='discord_not_actual') t.discord.actual=false; if(reason==='stale') t.discord.freshMs=1001; if(reason==='cache_override') t.discord.cacheOverride=true; if(reason==='degraded') t.degraded=true; if(reason==='timeout') t.timeout=true; if(reason==='restore_missing') t.restore=false; }
+    assert.ok(validateRunManifest(m).invalid_reasons.includes(reason), reason);
+  }
+});
+test("validate-manifest CLI returns 0 for accepted and 1 for rejected",()=>{
+  const d=mkdtempSync(join(tmpdir(),'aqua-manifest-')); try {
+    const good=join(d,'good.json'), bad=join(d,'bad.json'); writeFileSync(good,JSON.stringify(acceptedManifest())); writeFileSync(bad,JSON.stringify(rejectedManifest()));
+    const a=spawnSync(process.execPath,['packages/benchmark/validate-manifest.mjs',good],{encoding:'utf8'}); const b=spawnSync(process.execPath,['packages/benchmark/validate-manifest.mjs',bad],{encoding:'utf8'});
+    assert.equal(a.status,0); assert.equal(b.status,1); assert.equal(JSON.parse(a.stdout).valid,true); assert.equal(JSON.parse(b.stdout).valid,false);
+  } finally { rmSync(d,{recursive:true,force:true}); }
+});
+test("physical capture CLI rejects synthetic/cache evidence before writing",()=>{
+  const d=mkdtempSync(join(tmpdir(),'aqua-capture-')); try {
+    const input=join(d,'obs.jsonl'), out=join(d,'manifest.json');
+    writeFileSync(input, JSON.stringify({...acceptedManifest().trials[0], evidence:{hook:'synthetic',helper:'real',coreaudio:'real',discord:'actual'}})+'\n');
+    const r=spawnSync(process.execPath,['packages/benchmark/capture-physical-run.mjs',input,out],{encoding:'utf8'});
+    assert.equal(r.status,2); assert.equal(readFileSync(input,'utf8').includes('synthetic'),true);
+  } finally { rmSync(d,{recursive:true,force:true}); }
 });
