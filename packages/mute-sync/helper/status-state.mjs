@@ -1,9 +1,12 @@
 export const STATUS_PROTOCOL_VERSION = 1;
 /** Ignore CoreAudio/poll that disagrees with a recent button-bridge command. */
 export const BRIDGE_LATCH_MS = 750;
-/** A bridge/control command with no CoreAudio echo by this deadline rolls
- *  back — a stray key hint must never leave Discord inverted. Aqua's own
- *  key->CoreAudio reaction was measured at 1.1-1.3s, so allow headroom. */
+/** Observe-only: a bridge/control command with no CoreAudio echo by this
+ *  deadline is COUNTED and logged, never auto-reverted. Live evidence
+ *  2026-09-01 (~01:50): Aqua's key->CoreAudio echo streut 0.4s bis >4s
+ *  (Mic-Nachlauf beim Verarbeiten) — ein aktiver Rollback drehte echte
+ *  Diktate um (seq 53/59). Heilung: Kombi-Abort an der Quelle + CoreAudio-
+ *  Korrektur nach dem Latch + der Nutzer-Tap selbst. */
 export const CONFIRM_DEADLINE_MS = 2500;
 
 const DEFAULT_APPS = ["discord"];
@@ -23,6 +26,7 @@ export class StatusState {
         this.confirmation = null;
         this.controlRelays = 0;
         this.pendingCommand = null;
+        this.unconfirmedCommands = 0;
         this.apps = new Map(apps.map(app => [app, {
             muted: null,
             online: false,
@@ -45,6 +49,7 @@ export class StatusState {
             intent: this.intent,
             confirmation: this.confirmation,
             controlRelays: this.controlRelays,
+            unconfirmedCommands: this.unconfirmedCommands,
             apps: Object.fromEntries(
                 [...this.apps].map(([app, state]) => [app, { ...state }])
             )
@@ -52,7 +57,7 @@ export class StatusState {
     }
 
     isBridgeLatched(recording, source) {
-        if (COMMAND_SOURCES.has(source) || source === "rollback") return false;
+        if (COMMAND_SOURCES.has(source)) return false;
         if (this.lastBridgeRecording === null) return false;
         const ts = this.now();
         return (ts - this.lastBridgeAt) < BRIDGE_LATCH_MS
@@ -60,7 +65,7 @@ export class StatusState {
     }
 
     setRecording(recording, source, metadata = {}) {
-        if (typeof recording !== "boolean" || !COMMAND_SOURCES.has(source) && !["coreaudio", "poll:mic_timings", "poll:wav", "poll:stale", "rollback"].includes(source)) return false;
+        if (typeof recording !== "boolean" || !COMMAND_SOURCES.has(source) && !["coreaudio", "poll:mic_timings", "poll:wav", "poll:stale"].includes(source)) return false;
         if (metadata?.hookSeq !== undefined && !(Number.isSafeInteger(metadata.hookSeq) && metadata.hookSeq >= 0)) return false;
         if (metadata?.hookMonoNs !== undefined && !(typeof metadata.hookMonoNs === "string" && /^\d+$/.test(metadata.hookMonoNs))) return false;
         const ts = this.now();
@@ -101,11 +106,16 @@ export class StatusState {
     }
 
     /** Bridge/control transition past the confirm deadline with no CoreAudio
-     *  echo -> the caller should roll back to the prior state. */
+     *  echo — observe-only: returns it ONCE for logging/metrics, never mutates
+     *  recording state (see CONFIRM_DEADLINE_MS note). */
     unconfirmedCommand(now = this.now()) {
         if (!this.pendingCommand) return null;
         if (now - this.pendingCommand.at < CONFIRM_DEADLINE_MS) return null;
-        return this.pendingCommand;
+        const pending = this.pendingCommand;
+        this.pendingCommand = null;
+        this.unconfirmedCommands++;
+        this.seq++;
+        return pending;
     }
 
     /** A competing control route (set_mute/toggle_mute/aqua_toggle relay) fired. */

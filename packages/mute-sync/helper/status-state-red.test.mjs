@@ -52,20 +52,23 @@ test('reportApp rejects stale client sequence metadata', () => {
   }), false);
 });
 
-test('an unconfirmed bridge command rolls back after the deadline and CoreAudio echoes clear it', async () => {
+test('an unconfirmed bridge command is observed once after the deadline and NEVER mutates state', async () => {
   const { CONFIRM_DEADLINE_MS } = await import('./status-state.mjs');
   let t = 1000;
   const state = new StatusState({ now: () => t, monoNow: () => '1' });
   state.setRecording(true, 'bridge', { hookSeq: 1, hookMonoNs: '10' });
   t = 1000 + CONFIRM_DEADLINE_MS - 1;
-  assert.equal(state.unconfirmedCommand(), null, 'inside the deadline nothing rolls back');
+  assert.equal(state.unconfirmedCommand(), null, 'inside the deadline nothing fires');
   t = 1000 + CONFIRM_DEADLINE_MS + 1;
   const pending = state.unconfirmedCommand();
   assert.deepEqual({ recording: pending.recording, prev: pending.prev }, { recording: true, prev: false });
-  // rollback source is accepted, bypasses the latch, and clears the pending command
-  assert.equal(state.setRecording(pending.prev, 'rollback'), true);
-  assert.equal(state.recording, false);
-  assert.equal(state.unconfirmedCommand(), null);
+  // observe-only: recording untouched, counted exactly once, visible in snapshot
+  assert.equal(state.recording, true);
+  assert.equal(state.snapshot().unconfirmedCommands, 1);
+  assert.equal(state.unconfirmedCommand(), null, 'fires only once per command');
+  // an active rollback source is no longer a valid writer
+  assert.equal(state.setRecording(false, 'rollback'), false);
+  assert.equal(state.recording, true);
 });
 
 test('a timely CoreAudio agreement clears the pending command', () => {

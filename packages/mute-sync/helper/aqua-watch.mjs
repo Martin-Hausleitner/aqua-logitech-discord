@@ -166,8 +166,9 @@ let lastWav = newestWav();
 setInterval(() => {
     const unconfirmed = status.unconfirmedCommand();
     if (unconfirmed) {
-        log(`rollback: ${unconfirmed.recording} unconfirmed for ${Date.now() - unconfirmed.at}ms -> ${unconfirmed.prev}`);
-        setRecording(unconfirmed.prev, "rollback");
+        // Observe-only: CoreAudio nach dem Latch bleibt die Korrektur-Autorität.
+        log(`unconfirmed command: recording=${unconfirmed.recording} ohne CoreAudio-Echo seit ${Date.now() - unconfirmed.at}ms (#${status.unconfirmedCommands})`);
+        broadcastState();
     }
     const t = mtimeOf(MIC_TIMINGS);
     const w = newestWav();

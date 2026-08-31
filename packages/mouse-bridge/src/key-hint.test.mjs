@@ -51,5 +51,6 @@ test("the tap binary is listen-only", () => {
     assert.match(swift, /options: \.listenOnly/);
     assert.doesNotMatch(swift, /tapDisable|postEvent|CGEventPost/);
     assert.match(swift, /rightCommand: Int64 = 54/);
-    assert.match(swift, /rightControl: Int64 = 62/);
+    assert.match(swift, /rightOption: Int64 = 61/);
+    assert.doesNotMatch(swift, /= 62/); // RightCtrl is NOT an Aqua lock key (live settings.json)
 });

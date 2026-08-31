@@ -760,6 +760,9 @@ function toggleSync() {
     if (!syncEnabled) {
         clearRestoreVerify();
         clearTransitionMeasurement();
+        // Zustand sofort zurückgeben — der Tropfen-Klick darf nie gemutet
+        // zurücklassen (Operator: "dauert ewig bis der snappt").
+        if (settings.store.ownMute) operationalRestore();
         clearPersistedBaseline();
     } else if (aquaRecording) {
         // Re-Enable während laufender Aufnahme → sofort Soll-Zustand herstellen

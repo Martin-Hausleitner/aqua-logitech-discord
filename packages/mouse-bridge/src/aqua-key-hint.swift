@@ -1,5 +1,6 @@
 // aqua-key-hint — listen-only CGEventTap for Aqua's LOCK keys (right Command /
-// right Control). v2: fires on key-DOWN for minimum latency and emits an
+// right Option — verified against Aqua settings.json hotkeys: MetaRight +
+// AltRight, both action "lock"). v2: fires on key-DOWN for minimum latency and emits an
 // explicit abort when the press turns out to be a combo or a long hold, so the
 // bridge can revert its optimistic flip immediately.
 //
@@ -20,7 +21,7 @@ import CoreGraphics
 import Foundation
 
 let rightCommand: Int64 = 54
-let rightControl: Int64 = 62
+let rightOption: Int64 = 61
 let maxTapMs = 500.0
 
 var pendingKey: Int64? = nil
@@ -52,10 +53,10 @@ guard let tap = CGEvent.tapCreate(
         }
         let keycode = event.getIntegerValueField(.keyboardEventKeycode)
         let nowMs = Date().timeIntervalSince1970 * 1000
-        if keycode == rightCommand || keycode == rightControl {
+        if keycode == rightCommand || keycode == rightOption {
             let isDown = keycode == rightCommand
                 ? event.flags.contains(.maskCommand)
-                : event.flags.contains(.maskControl)
+                : event.flags.contains(.maskAlternate)
             if isDown {
                 if pendingKey != nil && pendingKey != keycode {
                     // Second lock modifier joined (RightCmd then RightCtrl):
