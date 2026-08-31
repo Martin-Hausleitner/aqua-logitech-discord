@@ -114,7 +114,7 @@ test('redactPublicSummary removes local identifiers and preserves benchmark metr
   const summary = {
     percentiles: { p50: 16, p95: 25, p99: 25 },
     measuredTrials: 20,
-    sourcePath: '/Users/operator/private/trace.json',
+    sourcePath: 'fixture://private-trace',
     wsUrl: 'ws://127.0.0.1:1234/private',
     processId: 42,
     inputPayload: 'secret',
