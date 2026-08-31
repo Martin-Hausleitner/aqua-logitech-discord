@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseJsonl, analyzeCycles, validateRunManifest } from "./jsonl-cycles.mjs";
+import { parseJsonl, analyzeCycles, validateRunManifest, validateManifestTrial, summarizeManifestTrials } from "./jsonl-cycles.mjs";
 import { serializeStateFrame } from "./observe.mjs";
 const line = ({observerSeq=0,stateSeq=0,monoNs=2_000_000_000,recording=false,appStateSeq=undefined,source="coreaudio",degraded=false,intent=null,confirmation=null,muted=false,online=true,discordStateSeq=stateSeq,clientMonoMs=1_000}={}) => JSON.stringify({observerDate:1_700_000_000_000,observerMonoNs:String(monoNs),observerSeq,stateSeq,appStateSeq,recording,source,degraded,intent,confirmation,discord:{muted,online,stateSeq:discordStateSeq,clientMonoMs}});
 const cycle=(i=0,base=false)=>{const os=i*5,ss=10_000+os,ns=2_000_000_000+os*1_000_000;return [line({observerSeq:os,stateSeq:ss,monoNs:ns,muted:base}),line({observerSeq:os+1,stateSeq:ss+1,monoNs:ns+1_000_000,recording:true,source:"bridge",intent:{recording:true,source:"bridge",hookSeq:os+1,hookMonoNs:String(ns)},muted:base}),line({observerSeq:os+2,stateSeq:ss+2,monoNs:ns+2_000_000,recording:true,muted:true}),line({observerSeq:os+3,stateSeq:ss+3,monoNs:ns+3_000_000,source:"bridge",intent:{recording:false,source:"bridge",hookSeq:os+3,hookMonoNs:String(ns+2_000_000)},muted:true}),line({observerSeq:os+4,stateSeq:ss+4,monoNs:ns+4_000_000,muted:base})]};
@@ -27,3 +27,18 @@ const validManifest=()=>({schema:"aqua.run-manifest.v1",sourceIdentity:"aqua-sou
 test("run manifest accepts all ten gates and emits machine-checkable result",()=>{const r=validateRunManifest(validManifest());assert.equal(r.valid,true);assert.equal(r.all_gates_valid,true);assert.deepEqual(r.errors,[]);assert.deepEqual(r.invalid_reasons,[]);});
 test("run manifest reports stable reasons and fails closed",()=>{const m=validManifest();m.trials[7].discord={actual:false,freshMs:5000,cacheOverride:true};m.trials[8].timeout=true;m.trials[9].restore=false;m.physicalLatencyExcluded=false;const r=validateRunManifest(m);assert.equal(r.valid,false);for(const reason of ["discord_not_actual","stale","cache_override","timeout","restore_missing","physical_latency_included"])assert.ok(r.invalid_reasons.includes(reason),reason);});
 test("run manifest rejects identity, route, sequence and same-seq confirmation gaps",()=>{const m=validManifest();delete m.sourceIdentity;m.routeCount=2;m.trials[1].hook.hookSeq=1;m.trials[2].confirmation={source:"coreaudio",recording:true,stateSeq:999};const r=validateRunManifest(m);assert.equal(r.valid,false);for(const reason of ["missing_field","route_mismatch","seq_mismatch","confirmation_mismatch"])assert.ok(r.invalid_reasons.includes(reason),reason);});
+test("manifest trial accepts latencyMs fallback and rejects stale or non-monotonic-clock receipts",()=>{
+  const t=manifestTrial(0); delete t.discord.freshMs; t.discord.latencyMs=12;
+  assert.deepEqual(validateManifestTrial(t),[]);
+  t.discord.latencyMs=1001; assert.ok(validateManifestTrial(t).includes("stale"));
+  t.discord.latencyMs=12; t.sameClock=false; assert.ok(validateManifestTrial(t).includes("clock_mismatch"));
+});
+test("manifest aggregate excludes five warmups and reports p50/p95/p99",()=>{
+  const ts=Array.from({length:25},(_,i)=>manifestTrial(i,{discord:{actual:true,freshMs:i+1,cacheOverride:false}}));
+  const s=summarizeManifestTrials(ts); assert.equal(s.accepted,true); assert.equal(s.warmupsExcluded,5); assert.equal(s.measuredTrials,20);
+  assert.deepEqual(s.percentiles,{p50:15,p95:24,p99:25});
+});
+test("manifest aggregate remains fail-closed for restore and disconnect vectors",()=>{
+  const ts=Array.from({length:25},(_,i)=>manifestTrial(i)); ts[6].restore=false; ts[7].disconnected=true;
+  const s=summarizeManifestTrials(ts); assert.equal(s.accepted,false); assert.ok(s.invalid_reasons.includes("insufficient_trials"));
+});

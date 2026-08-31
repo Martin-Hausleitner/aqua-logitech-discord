@@ -15,6 +15,26 @@ export function analyzeCycles(frames,{warmups=5,measuredMinimum=20}={}){
  let life=0,active=null,q=[];for(let i=0;i<fs.length;i++){const f=fs[i];if(!active){if(!f.recording&&f.discord.online&&typeof f.discord.muted==='boolean')active={base:f};continue}if(!active.start&&f.recording){active.start=f;active.si=i;continue}if(active.start&&!f.recording){life++;const s=active.start,b=f,mu=fs[active.si+1],r=fs[i+1],ok=mu?.recording&&mu.discord.online&&mu.discord.muted===true&&b.discord.online&&b.discord.muted===true&&r&&!r.recording&&r.discord.online&&r.discord.muted===active.base.discord.muted&&s.source==='bridge'&&b.source==='bridge'&&s.intent?.source==='bridge'&&b.intent?.source==='bridge'&&s.intent.recording===true&&b.intent.recording===false&&Number.isInteger(s.intent.hookSeq)&&s.intent.hookSeq>=0&&Number.isInteger(b.intent.hookSeq)&&b.intent.hookSeq>=0&&digits(s.intent.hookMonoNs)&&digits(b.intent.hookMonoNs);if(ok){const a=BigInt(s.intent.hookMonoNs),z=BigInt(b.intent.hookMonoNs),t=[BigInt(s.observerMonoNs)-a,BigInt(mu.observerMonoNs)-a,BigInt(b.observerMonoNs)-z,BigInt(r.observerMonoNs)-z];if(t.every(x=>x>=0n))q.push(t.map(x=>Number(x/1000000n)))}active=r?{base:r}:null}}
  const h=q.length,m=Math.max(0,h-warmups),a=h>=warmups+measuredMinimum,o={accepted:a,status:a?'accepted':'rejected',reason:a?undefined:'insufficient qualified cycles',warmupsExcluded:Math.min(warmups,h),measuredCycles:m,lifecycleCycles:life,hookQualified:h};if(h){o.hookStartToHelperMs=q[0][0];o.hookStartToDiscordMs=q[0][1];o.hookStopToHelperMs=q[0][2];o.hookStopToRestoreMs=q[0][3];o.hookStartToHelperMsAll=q.map(x=>x[0]);o.hookStartToDiscordMsAll=q.map(x=>x[1]);o.hookStopToHelperMsAll=q.map(x=>x[2]);o.hookStopToRestoreMsAll=q.map(x=>x[3])}return o}
 
+/** Validate one machine-readable trial. Returns stable fail-closed gate reasons. */
+export function validateManifestTrial(t) {
+ const e=[]; const add=(ok,r)=>{if(!ok)e.push(r)}; const h=t?.hook,c=t?.confirmation,d=t?.discord;
+ add(Number.isInteger(h?.hookSeq),'seq_mismatch');
+ let n; try { if(/^\d+$/.test(String(h?.hookMonoNs))) n=BigInt(h.hookMonoNs); } catch {}
+ add(n!==undefined,'clock_mismatch');
+ add(c?.source==='coreaudio'&&c?.recording===h?.recording&&(c?.hookSeq===h?.hookSeq||c?.seq===h?.hookSeq||c?.stateSeq===t?.stateSeq),'confirmation_mismatch');
+ add(d?.actual===true,'discord_not_actual'); const fresh=Number.isFinite(d?.freshMs)?d.freshMs:d?.latencyMs;
+ add(Number.isFinite(fresh)&&fresh>=0&&fresh<=1000,'stale'); add(d?.cacheOverride!==true&&d?.cache_override!==true,'cache_override');
+ add(!t?.degraded&&!t?.disconnected,'degraded'); add(!t?.timeout,'timeout'); add(t?.restore===true||t?.restored===true,'restore_missing');
+ if(t?.sameClock!==undefined) add(t.sameClock===true,'clock_mismatch'); return [...new Set(e)];
+}
+export function summarizeManifestTrials(trials,{warmups=5,measuredMinimum=20}={}) {
+ const ts=Array.isArray(trials)?trials:[]; const valid=ts.map(validateManifestTrial);
+ const qualified=ts.filter((_,i)=>valid[i].length===0); const measured=qualified.slice(warmups);
+ if(measured.length<measuredMinimum) return {accepted:false,warmupsExcluded:Math.min(warmups,qualified.length),validTrials:qualified.length,measuredTrials:measured.length,invalid_reasons:["insufficient_trials"]};
+ const values=measured.map(t=>Number.isFinite(t?.discord?.freshMs)?t.discord.freshMs:t?.discord?.latencyMs).filter(Number.isFinite).sort((a,b)=>a-b);
+ const rank=p=>values[Math.max(0,Math.ceil(p*values.length)-1)];
+ return {accepted:true,warmupsExcluded:warmups,validTrials:qualified.length,measuredTrials:measured.length,percentiles:{p50:rank(.5),p95:rank(.95),p99:rank(.99)},invalid_reasons:[]};
+}
 /** Validate the machine-readable, fail-closed benchmark receipt. */
 export function validateRunManifest(m,{warmups=5,measuredMinimum=20}={}) {
  const errors=[]; const add=(ok,r)=>{if(!ok)errors.push(r)};
@@ -38,9 +58,7 @@ export function validateRunManifest(m,{warmups=5,measuredMinimum=20}={}) {
   add(n!==undefined&&n>mono,'clock_mismatch'); if(n!==undefined)mono=n;
   const sameSeq=(c?.hookSeq===h?.hookSeq||c?.seq===h?.hookSeq||c?.stateSeq===t?.stateSeq);
   add(c?.source==='coreaudio'&&c?.recording===h?.recording&&sameSeq,'confirmation_mismatch');
-  add(d?.actual===true,'discord_not_actual'); add(Number.isFinite(d?.freshMs)&&d.freshMs<=1000,'stale'); add(d?.cacheOverride!==true&&d?.cache_override!==true,'cache_override');
-  add(!t?.degraded&&!t?.disconnected,'degraded'); add(!t?.timeout,'timeout');
-  add(t?.restore===true||t?.restored===true,'restore_missing');
+  for (const reason of validateManifestTrial(t)) add(false,reason);
  }
  const unique=[...new Set(errors)]; return {valid:unique.length===0,all_gates_valid:unique.length===0,errors:unique,invalid_reasons:unique};
 }
