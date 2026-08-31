@@ -1,0 +1,9 @@
+{
+  "name": "aqua-mute-sync",
+  "private": true,
+  "version": "1.0.0",
+  "description": "AquaMuteSync helper + Vencord plugin sources with executable source-level tests",
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

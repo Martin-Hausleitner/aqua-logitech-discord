@@ -7,12 +7,17 @@
 import { ChatBarButton } from "@api/ChatButtons";
 import { definePluginSettings } from "@api/Settings";
 import definePlugin, { OptionType } from "@utils/types";
-import { findByPropsLazy } from "@webpack";
-import { MediaEngineStore, React, showToast, Toasts } from "@webpack/common";
-
-const VoiceActions = findByPropsLazy("toggleSelfMute", "toggleSelfDeaf");
+import { React, showToast, Toasts } from "@webpack/common";
 
 const settings = definePluginSettings({
+    // WICHTIG: nicht "enabled" nennen — dieser Key ist Vencords Plugin-Enable-Flag
+    // (plugins.AquaMuteSync.enabled). Ein Settings-Key "enabled" würde beim
+    // Override-Aus das ganze Plugin beim nächsten Start deaktivieren.
+    autoSync: {
+        type: OptionType.BOOLEAN,
+        description: "Aqua-Aufnahme → Discord-Mute-Synchronisierung aktiv",
+        default: true
+    },
     port: {
         type: OptionType.NUMBER,
         description: "Port des aqua-watch-Helpers (ws://127.0.0.1:<port>)",
@@ -21,7 +26,7 @@ const settings = definePluginSettings({
     pollIntervalMs: {
         type: OptionType.NUMBER,
         description: "Drift-Schutz: Poll-Intervall (ms) für den Zustands-Doppelcheck",
-        default: 2000
+        default: 50
     },
     showToasts: {
         type: OptionType.BOOLEAN,
@@ -41,6 +46,36 @@ const settings = definePluginSettings({
         description: "intern: Self-Mute-Zustand vor der laufenden Aufnahme",
         default: false,
         hidden: true
+    },
+    preMuteKnown: {
+        type: OptionType.BOOLEAN,
+        description: "intern: Baseline wurde tatsächlich aus Discord beobachtet",
+        default: false,
+        hidden: true
+    },
+    baselineStateSeq: {
+        type: OptionType.NUMBER,
+        description: "intern: Helper-State-Sequenz der bekannten Baseline",
+        default: -1,
+        hidden: true
+    },
+    baselineSource: {
+        type: OptionType.STRING,
+        description: "intern: Quelle der bekannten Baseline",
+        default: "",
+        hidden: true
+    },
+    baselineHookSeq: {
+        type: OptionType.NUMBER,
+        description: "intern: Hook-Sequenz der bekannten Baseline",
+        default: -1,
+        hidden: true
+    },
+    baselineHookMonoNs: {
+        type: OptionType.STRING,
+        description: "intern: Hook-Monotonic-Zeit der bekannten Baseline",
+        default: "",
+        hidden: true
     }
 });
 
@@ -49,7 +84,10 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let transitionMeasureTimer: ReturnType<typeof setTimeout> | null = null;
 let restoreVerifyTimer: ReturnType<typeof setTimeout> | null = null;
+let postClickReportTimer: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;
+let domObserver: MutationObserver | null = null;
+let overrideButton: HTMLButtonElement | null = null;
 
 const TRANSITION_POLL_MS = 25;
 const TRANSITION_TIMEOUT_MS = 1000;
@@ -64,16 +102,215 @@ let lastSeq = -1;
 let driftToastShown = false;
 let statusClientSeq = 0;
 let lastReportedMute: boolean | null = null;
+let latestStateSeq: number | null = null;
+let latestStateReceivedMonoMs: number | null = null;
+let latestStateIntent: StateEvidence | null = null;
+let latestStateConfirmation: CoreAudioConfirmation | null = null;
+let latestHookSeq: number | null = null;
+let latestBridgeTuple: BridgeStateTuple | null = null;
+let activeBaselineProvenance: BridgeStateTuple | null = null;
+
+const STATE_FRESH_MS = 1000;
+
+interface StateEvidence {
+    recording: boolean;
+    source: string;
+    hookSeq: number;
+    hookMonoNs: string;
+}
+
+interface BridgeStateTuple extends StateEvidence {
+    stateSeq: number;
+    receivedMonoMs: number;
+}
+
+interface CoreAudioConfirmation {
+    stateSeq: number;
+    recording: boolean;
+    source: "coreaudio";
+    receivedMonoMs: number;
+}
 
 /** Mini-Store, damit der Button reaktiv re-rendert */
 const listeners = new Set<() => void>();
 const notify = () => listeners.forEach(l => l());
 
-const isSelfMute = (): boolean => !!MediaEngineStore?.isSelfMute?.();
+const PROXY_CHECK = "__vc_proxy_check__";
+function isSafeModule(mod: any): boolean {
+    if (!mod || typeof mod !== "object") return false;
+    if (mod[Symbol.toStringTag] === "IntlMessagesProxy") return false;
+    if (mod[PROXY_CHECK] !== undefined) {
+        try { Reflect.deleteProperty(mod, PROXY_CHECK); } catch {}
+        return false;
+    }
+    return true;
+}
+
+const getMediaEngineStore = () => {
+    try {
+        const wp = (window as any).Vencord?.Webpack;
+        if (wp?.fluxStores?.has?.("MediaEngineStore")) {
+            return wp.fluxStores.get("MediaEngineStore");
+        }
+        const cache = wp?.wreq?.c || wp?.cache;
+        if (cache) {
+            for (const id in cache) {
+                const exp = cache[id]?.exports;
+                if (!exp) continue;
+                const candidates = [exp, exp.default, exp.Z, exp.ZP];
+                for (const c of candidates) {
+                    if (isSafeModule(c) && typeof c?.isSelfMute === "function") {
+                        wp?.fluxStores?.set?.("MediaEngineStore", c);
+                        return c;
+                    }
+                }
+            }
+        }
+        const Flux = wp?.Common?.Flux;
+        const allStores = Flux?.Store?.getAll?.();
+        if (Array.isArray(allStores)) {
+            const found = allStores.find(
+                (s: any) => isSafeModule(s) && (s?.getName?.() === "MediaEngineStore" || typeof s?.isSelfMute === "function")
+            );
+            if (found) {
+                wp?.fluxStores?.set?.("MediaEngineStore", found);
+                return found;
+            }
+        }
+        if (wp?.Common?.MediaEngineStore && isSafeModule(wp.Common.MediaEngineStore)) {
+            return wp.Common.MediaEngineStore;
+        }
+    } catch {}
+    return null;
+};
+
+function getDomMuteButton(): HTMLButtonElement | null {
+    try {
+        const buttons = document.querySelectorAll<HTMLButtonElement>("button[aria-label]");
+        return Array.from(buttons).find(isSelfMuteButton) ?? null;
+    } catch {
+        return null;
+    }
+}
+
+function isSelfMuteButton(btn: HTMLButtonElement): boolean {
+    try {
+        const label = (btn.getAttribute("aria-label") || "").trim().toLowerCase();
+        // Discord's voice control labels are short state labels. Requiring the
+        // whole label avoids treating stream/user/server mute buttons as proof.
+        return /^(?:un)?mute$/.test(label) ||
+            /^stumm(?:schalten|geschaltet|schaltung aufheben)$/.test(label);
+    } catch {
+        return false;
+    }
+}
+
+function getDomMuteState(): boolean | null {
+    try {
+        const btn = getDomMuteButton();
+        if (!btn) return null;
+        const label = (btn.getAttribute("aria-label") || "").toLowerCase();
+        const checked = btn.getAttribute("aria-checked");
+        if (checked === "true") return true;
+        if (checked === "false") return false;
+        if (label.includes("unmute") || label.includes("aufheben") || label.includes("de-stumm")) return true;
+        if (label.includes("mute") || label.includes("stumm")) return false;
+    } catch {}
+    return null;
+}
+
+let localMuteOverride: boolean = false;
+
+/** Read Discord's actual state; null means that no trustworthy observation exists. */
+function getObservedSelfMute(): boolean | null {
+    let domState: boolean | null = null;
+    try { domState = getDomMuteState(); } catch {}
+    if (domState !== null) return domState;
+    try {
+        const store = getMediaEngineStore();
+        if (typeof store?.isSelfMute === "function") {
+            const value = store.isSelfMute();
+            return typeof value === "boolean" ? value : null;
+        }
+    } catch {}
+    return null;
+}
+
+/** Writer fallback only: never use this inferred value as an observation. */
+const getControlSelfMute = (): boolean => getObservedSelfMute() ?? localMuteOverride;
+
+const isSelfMute = (): boolean | null => {
+    return getObservedSelfMute();
+};
+
+function parseBridgeIntent(value: unknown): StateEvidence | null {
+    if (!value || typeof value !== "object") return null;
+    const evidence = value as Record<string, unknown>;
+    return typeof evidence.recording === "boolean" &&
+        typeof evidence.source === "string" &&
+        Number.isSafeInteger(evidence.hookSeq) && (evidence.hookSeq as number) >= 0 &&
+        typeof evidence.hookMonoNs === "string" && /^\d+$/.test(evidence.hookMonoNs)
+        ? { recording: evidence.recording, source: evidence.source, hookSeq: evidence.hookSeq as number, hookMonoNs: evidence.hookMonoNs }
+        : null;
+}
+
+function bridgeTupleFromState(message: unknown, receivedMonoMs = performance.now()): BridgeStateTuple | null {
+    if (!message || typeof message !== "object") return null;
+    const state = message as Record<string, unknown>;
+    const intent = parseBridgeIntent(state.intent);
+    if (!Number.isSafeInteger(state.seq) || (state.seq as number) < 0 || state.source !== "bridge" || state.recording !== true && state.recording !== false || !intent || intent.source !== "bridge" || intent.recording !== state.recording) return null;
+    return { stateSeq: state.seq as number, receivedMonoMs, ...intent };
+}
+
+function parseCoreAudioConfirmation(value: unknown, stateSeq: number, recording: boolean, intent: StateEvidence | null, receivedMonoMs: number): CoreAudioConfirmation | null {
+    if (!value || typeof value !== "object" || !intent || intent.recording !== recording) return null;
+    const confirmation = value as Record<string, unknown>;
+    if (confirmation.source !== "coreaudio" || confirmation.recording !== recording || "hookSeq" in confirmation || "hookMonoNs" in confirmation) return null;
+    return { stateSeq, recording, source: "coreaudio", receivedMonoMs };
+}
+
+function sameBridgeTuple(a: BridgeStateTuple | null, b: BridgeStateTuple | null) {
+    return !!a && !!b && a.stateSeq === b.stateSeq && a.source === b.source && a.recording === b.recording && a.hookSeq === b.hookSeq && a.hookMonoNs === b.hookMonoNs;
+}
+
+export function qualifyTransition({ captured, current, confirmation, now, observed, helperConnected: connected, helperDegraded: degraded }: { captured: BridgeStateTuple | null; current: BridgeStateTuple | null; confirmation: CoreAudioConfirmation | null; now: number; observed: boolean; helperConnected: boolean; helperDegraded: boolean }) {
+    return observed && connected && !degraded && sameBridgeTuple(captured, current) && current !== null && confirmation !== null &&
+        confirmation.source === "coreaudio" && confirmation.stateSeq === current.stateSeq && confirmation.recording === current.recording &&
+        now - current.receivedMonoMs >= 0 && now - current.receivedMonoMs <= STATE_FRESH_MS &&
+        now - confirmation.receivedMonoMs >= 0 && now - confirmation.receivedMonoMs <= STATE_FRESH_MS;
+}
+
+function currentBridgeTuple(recording?: boolean) {
+    return latestBridgeTuple && (recording === undefined || latestBridgeTuple.recording === recording) ? latestBridgeTuple : null;
+}
+
+function handleHelperState(message: unknown) {
+    if (!message || typeof message !== "object") return false;
+    const state = message as Record<string, unknown>;
+    if (state.type !== "state" || typeof state.recording !== "boolean" || !Number.isSafeInteger(state.seq)) return false;
+    const receivedMonoMs = performance.now();
+    const intent = parseBridgeIntent(state.intent);
+    latestStateSeq = state.seq as number;
+    latestStateReceivedMonoMs = receivedMonoMs;
+    latestStateIntent = intent;
+    latestHookSeq = intent?.hookSeq ?? null;
+    latestBridgeTuple = bridgeTupleFromState(state, receivedMonoMs);
+    latestStateConfirmation = parseCoreAudioConfirmation(state.confirmation, latestStateSeq, state.recording, intent, receivedMonoMs);
+    helperDegraded = state.degraded === true;
+    helperConnected = true;
+    reconcile(state.recording, latestStateSeq);
+    notify();
+    return true;
+}
+
+function handleIncomingMessage(message: unknown) {
+    return handleHelperState(message);
+}
 
 function reportDiscordMute(force = false) {
     if (ws?.readyState !== WebSocket.OPEN) return;
     const muted = isSelfMute();
+    if (muted === null) return;
     if (!force && muted === lastReportedMute) return;
     lastReportedMute = muted;
     ws.send(JSON.stringify({
@@ -81,16 +318,115 @@ function reportDiscordMute(force = false) {
         type: "app_state",
         app: "discord",
         muted,
+        clientSeq: statusClientSeq++,
+        clientMonoMs: performance.now(),
+        stateSeq: latestStateSeq
+    }));
+}
+
+function publishAutoSync() {
+    if (ws?.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({
+        v: 1,
+        type: "set_auto_sync",
+        app: "discord",
+        enabled: syncEnabled,
         clientSeq: statusClientSeq++
     }));
 }
 
+/** Report a manual/action click only after Discord has updated its own state. */
+function reportDiscordMuteAfterClick() {
+    if (postClickReportTimer) clearTimeout(postClickReportTimer);
+    postClickReportTimer = setTimeout(() => {
+        postClickReportTimer = null;
+        reportDiscordMute(true);
+    }, TRANSITION_POLL_MS);
+}
+
 const onMediaEngineChange = () => reportDiscordMute();
 
+function findVoiceActionsInCache() {
+    const wp = (window as any).Vencord?.Webpack;
+    const cache = wp?.wreq?.c || wp?.cache;
+    if (!cache) return null;
+    for (const id in cache) {
+        const exp = cache[id]?.exports;
+        if (!exp) continue;
+        const candidates = [exp, exp.default, exp.Z, exp.ZP];
+        for (const c of candidates) {
+            if (isSafeModule(c) && typeof c?.toggleSelfMute === "function" && typeof c?.toggleSelfDeaf === "function") {
+                return c;
+            }
+        }
+    }
+    return null;
+}
+
+function toggleMute() {
+    console.info("[AquaMuteSync] toggleMute called");
+    const target = !getControlSelfMute();
+    let wrote = false;
+    const btn = getDomMuteButton();
+    if (btn) {
+        console.info("[AquaMuteSync] clicking DOM mute button:", btn.getAttribute("aria-label"));
+        try { btn.click(); wrote = true; } catch (error) { console.error("[AquaMuteSync] DOM mute click failed", error); }
+    } else {
+        try {
+            const actions = findVoiceActionsInCache();
+            if (typeof actions?.toggleSelfMute === "function") {
+                console.info("[AquaMuteSync] calling actions.toggleSelfMute()");
+                actions.toggleSelfMute(); wrote = true;
+            } else {
+                const FluxDispatcher = (window as any).Vencord?.Webpack?.Common?.FluxDispatcher;
+                if (FluxDispatcher?.dispatch) {
+                    console.info("[AquaMuteSync] dispatching AUDIO_TOGGLE_SELF_MUTE via FluxDispatcher");
+                    FluxDispatcher.dispatch({
+                        type: "AUDIO_TOGGLE_SELF_MUTE",
+                        context: "default",
+                        syncRemote: true
+                    }); wrote = true;
+                }
+            }
+        } catch (e) {
+            console.error("[AquaMuteSync] toggleMute fallback error:", e);
+        }
+    }
+    if (wrote) localMuteOverride = target;
+    reportDiscordMuteAfterClick();
+}
+
 /** Mute SETZEN (nicht blind togglen): nur togglen, wenn Ist ≠ Soll. */
-function setSelfMute(target: boolean) {
-    if (!VoiceActions?.toggleSelfMute) return;
-    if (isSelfMute() !== target) VoiceActions.toggleSelfMute();
+function setSelfMute(target: boolean, reportAfterWrite = true, allowWhenDisabled = false) {
+    if (!syncEnabled && !allowWhenDisabled) return;
+    const current = getControlSelfMute();
+    console.info(`[AquaMuteSync] setSelfMute target=${target} current=${current} domState=${getDomMuteState()}`);
+    if (current !== target) {
+        let wrote = false;
+        const btn = getDomMuteButton();
+        if (btn) {
+            try { btn.click(); wrote = true; } catch (error) { console.error("[AquaMuteSync] DOM set-mute click failed", error); }
+        } else {
+            try {
+                const actions = findVoiceActionsInCache();
+                if (typeof actions?.setSelfMute === "function") {
+                    actions.setSelfMute(target); wrote = true;
+                } else {
+                    const FluxDispatcher = (window as any).Vencord?.Webpack?.Common?.FluxDispatcher;
+                    if (FluxDispatcher?.dispatch) {
+                        FluxDispatcher.dispatch({
+                            type: "AUDIO_SET_SELF_MUTE",
+                            context: "default",
+                            mute: target,
+                            syncRemote: true
+                    }); wrote = true;
+                    }
+                }
+            } catch (error) { console.error("[AquaMuteSync] setSelfMute writer failed", error); }
+        }
+        if (wrote) localMuteOverride = target;
+    }
+    if (reportAfterWrite) reportDiscordMuteAfterClick();
 }
 
 function clearTransitionMeasurement() {
@@ -103,73 +439,144 @@ function clearRestoreVerify() {
     restoreVerifyTimer = null;
 }
 
-function measureTransition(target: boolean, phase: "mute" | "restore", startedAt: number) {
+function measureTransition(target: boolean, phase: "mute" | "restore", startedAt: number, captured: BridgeStateTuple | null) {
     clearTransitionMeasurement();
     const check = () => {
         const latencyMs = Math.round(performance.now() - startedAt);
-        if (isSelfMute() === target) {
+        const observed = isSelfMute();
+        if (observed === target) {
             transitionMeasureTimer = null;
             reportDiscordMute();
-            console.info(`[AquaMuteSync] ${phase} confirmed latencyMs=${latencyMs} target=${target}`);
+            if (qualifyTransition({ captured, current: currentBridgeTuple(), confirmation: latestStateConfirmation, now: performance.now(), observed, helperConnected, helperDegraded })) {
+                console.info(`[AquaMuteSync] transition-confirmed phase=${phase} latencyMs=${latencyMs} target=${target} stateSeq=${captured?.stateSeq ?? "unknown"} source=${captured?.source ?? "unknown"} hookSeq=${captured?.hookSeq ?? "unknown"}`);
+            } else {
+                console.info(`[AquaMuteSync] transition-observed-unqualified phase=${phase} target=${target}`);
+            }
         } else if (latencyMs < TRANSITION_TIMEOUT_MS) {
             transitionMeasureTimer = setTimeout(check, TRANSITION_POLL_MS);
         } else {
             transitionMeasureTimer = null;
-            console.warn(`[AquaMuteSync] ${phase} not confirmed latencyMs=${latencyMs} target=${target}`);
+            console.warn(`[AquaMuteSync] ${phase} timeout latencyMs=${latencyMs} target=${target} stateSeq=${captured?.stateSeq ?? "unknown"} hookSeq=${captured?.hookSeq ?? "unknown"}`);
         }
     };
     check();
 }
 
-function beginRecordingMute() {
-    clearRestoreVerify();
-    if (!settings.store.ownMute) {
-        settings.store.preMute = isSelfMute();
-        settings.store.ownMute = true;
-    }
-    const startedAt = performance.now();
-    setSelfMute(true);
-    measureTransition(true, "mute", startedAt);
+function clearPersistedBaseline() {
+    settings.store.ownMute = false;
+    settings.store.preMuteKnown = false;
+    settings.store.baselineStateSeq = -1;
+    settings.store.baselineSource = "";
+    settings.store.baselineHookSeq = -1;
+    settings.store.baselineHookMonoNs = "";
+    activeBaselineProvenance = null;
 }
 
-function restorePreMute(verifyAfterOneSecond: boolean) {
+function persistedBaselineMatches(cycle: BridgeStateTuple) {
+    return settings.store.ownMute && settings.store.preMuteKnown &&
+        settings.store.baselineStateSeq === cycle.stateSeq &&
+        settings.store.baselineSource === cycle.source &&
+        settings.store.baselineHookSeq === cycle.hookSeq &&
+        settings.store.baselineHookMonoNs === cycle.hookMonoNs;
+}
+
+function captureActualBaseline(cycle: BridgeStateTuple | null, observed = isSelfMute()) {
+    if (!cycle || observed === null) return false;
+    settings.store.preMute = observed;
+    settings.store.preMuteKnown = true;
+    settings.store.ownMute = true;
+    settings.store.baselineStateSeq = cycle.stateSeq;
+    settings.store.baselineSource = cycle.source;
+    settings.store.baselineHookSeq = cycle.hookSeq;
+    settings.store.baselineHookMonoNs = cycle.hookMonoNs;
+    activeBaselineProvenance = cycle;
+    return true;
+}
+
+function establishRecordingBaseline() {
+    const cycle = currentBridgeTuple(true);
+    if (!cycle) {
+        clearPersistedBaseline();
+        return false;
+    }
+    if (settings.store.ownMute) {
+        if (!settings.store.preMuteKnown) {
+            clearPersistedBaseline();
+            return false;
+        }
+        if (persistedBaselineMatches(cycle)) {
+            activeBaselineProvenance = cycle;
+            return true;
+        }
+        clearPersistedBaseline();
+    }
+    return captureActualBaseline(cycle);
+}
+
+function beginRecordingMute() {
+    clearRestoreVerify();
+    if (!establishRecordingBaseline()) return;
+    const startedAt = performance.now();
+    setSelfMute(true);
+    measureTransition(true, "mute", startedAt, currentBridgeTuple(true));
+}
+
+function restorePreMute(verifyAfterOneSecond: boolean, operational = false) {
     if (!settings.store.ownMute) return;
+    if (!settings.store.preMuteKnown || !activeBaselineProvenance) {
+        clearRestoreVerify();
+        clearPersistedBaseline();
+        return;
+    }
     clearRestoreVerify();
     const target = settings.store.preMute;
     const startedAt = performance.now();
-    setSelfMute(target);
-    measureTransition(target, "restore", startedAt);
+    setSelfMute(target, !operational, operational);
+    if (operational) console.info(`[AquaMuteSync] operational-restore-unqualified target=${target}`);
+    else measureTransition(target, "restore", startedAt, currentBridgeTuple(false));
 
     if (!verifyAfterOneSecond) {
-        settings.store.ownMute = false;
+        clearPersistedBaseline();
         return;
     }
 
     restoreVerifyTimer = setTimeout(() => {
         restoreVerifyTimer = null;
         if (aquaRecording || !settings.store.ownMute) return;
-        const corrected = isSelfMute() !== target;
+        const observed = isSelfMute();
+        const corrected = observed !== null && observed !== target;
         if (corrected) setSelfMute(target);
-        settings.store.ownMute = false;
+        clearPersistedBaseline();
         console.info(
             `[AquaMuteSync] restore recheck afterMs=${RESTORE_VERIFY_MS}` +
-            ` corrected=${corrected} restored=${isSelfMute() === target} target=${target}`
+            ` corrected=${corrected} restored=${observed === null ? "unknown" : observed === target} target=${target}`
         );
     }, RESTORE_VERIFY_MS);
 }
 
+function operationalRestore() {
+    restorePreMute(false, true);
+}
+
 function infoToast(msg: string) {
-    if (settings.store.showToasts) showToast(msg, Toasts.Type.MESSAGE);
+    if (settings.store.showToasts) {
+        try { showToast(msg, Toasts.Type.MESSAGE); } catch {}
+    }
 }
 
 /** Zentrale Zustandsübernahme (Events + Reconnect-Adoption + seq-Ordering). */
 function reconcile(rec: boolean, seq: number) {
+    console.info(`[AquaMuteSync] reconcile rec=${rec} seq=${seq} lastSeq=${lastSeq} aquaRecording=${aquaRecording} syncEnabled=${syncEnabled}`);
     if (seq >= 0) {
         if (seq < lastSeq) return; // veraltete Nachricht (Tribunal-Arch #4)
         lastSeq = seq;
     }
     if (rec === aquaRecording) {
-        if (!rec && settings.store.ownMute && !restoreVerifyTimer) restorePreMute(true);
+        if (!syncEnabled) return;
+        if (!rec && settings.store.ownMute && !restoreVerifyTimer) {
+            if (activeBaselineProvenance) restorePreMute(true);
+            else clearPersistedBaseline();
+        }
         return;
     }
     aquaRecording = rec;
@@ -188,17 +595,30 @@ function reconcile(rec: boolean, seq: number) {
 
 /** Drift-Schutz: erzwingt den Soll-Zustand, auch wenn Events verloren gingen
  *  oder der User während der Aufnahme manuell unmutet hat. */
+let lastGetStateAt = 0;
+const GET_STATE_EVERY_MS = 5000;
+
 function driftCheck() {
+    injectSyncOverrideButton();
     if (!syncEnabled) return;
-    if (ws?.readyState === WebSocket.OPEN)
+    const now = Date.now();
+    if (ws?.readyState === WebSocket.OPEN && now - lastGetStateAt >= GET_STATE_EVERY_MS) {
+        lastGetStateAt = now;
         ws.send(JSON.stringify({ type: "get_state" }));
+    }
     reportDiscordMute();
-    if (aquaRecording && helperConnected && !isSelfMute()) {
+    const observed = isSelfMute();
+    if (aquaRecording && helperConnected && observed === false) {
+        if (!settings.store.ownMute) {
+            if (!captureActualBaseline(currentBridgeTuple(true), observed)) return;
+        } else if (!activeBaselineProvenance) {
+            return;
+        }
         setSelfMute(true);
-        settings.store.ownMute = true;
+        measureTransition(true, "mute", performance.now(), currentBridgeTuple(true));
         if (!driftToastShown) {
             driftToastShown = true; // max 1× pro Aufnahme (Tribunal-UX #3)
-            showToast("🔒 AquaMuteSync: während Aqua-Aufnahme re-gemutet", Toasts.Type.FAILURE);
+            try { showToast("🔒 AquaMuteSync: während Aqua-Aufnahme re-gemutet", Toasts.Type.FAILURE); } catch {}
         }
     }
 }
@@ -215,23 +635,21 @@ function connect() {
         helperConnected = true;
         statusClientSeq = 0;
         lastReportedMute = null;
+        publishAutoSync();
         reportDiscordMute(true);
         notify();
     };
     ws.onmessage = e => {
         try {
-            const m = JSON.parse(e.data);
-            if (m.type === "state") {
-                helperDegraded = !!m.degraded;
-                reconcile(!!m.recording, typeof m.seq === "number" ? m.seq : -1);
-                notify();
-            }
+            handleIncomingMessage(JSON.parse(e.data));
         } catch { /* ignore */ }
     };
     ws.onclose = () => {
         helperConnected = false;
         lastReportedMute = null;
         lastSeq = -1; // Helper-Neustart setzt seq zurück
+        aquaRecording = false;
+        activeBaselineProvenance = null;
         notify();
         // Sicher-Verhalten: gehaltenes Mute NICHT blind lösen — Zustand wird beim
         // Reconnect per state-Message neu synchronisiert (Spec: Reconnect-Szenario).
@@ -250,14 +668,16 @@ function scheduleReconnect() {
 
 function toggleSync() {
     syncEnabled = !syncEnabled;
-    if (!syncEnabled && settings.store.ownMute) {
-        // Sync aus → nichts festhalten, Zustand zurückgeben
-        restorePreMute(false);
-    }
-    if (syncEnabled && aquaRecording) {
+    settings.store.autoSync = syncEnabled;
+    if (!syncEnabled) {
+        clearRestoreVerify();
+        clearTransitionMeasurement();
+        clearPersistedBaseline();
+    } else if (aquaRecording) {
         // Re-Enable während laufender Aufnahme → sofort Soll-Zustand herstellen
         beginRecordingMute();
     }
+    publishAutoSync();
     notify();
     infoToast(`AquaMuteSync ${syncEnabled ? "aktiviert" : "deaktiviert"}`);
 }
@@ -277,7 +697,7 @@ const AquaButton = () => {
           (helperDegraded ? " · ⚠️ degraded (nur Datei-Fallback)" : "");
 
     return (
-        <ChatBarButton tooltip={tooltip} onClick={toggleSync}>
+        <ChatBarButton tooltip={tooltip} onClick={toggleSync} aria-label={`AquaMuteSync ${syncEnabled ? "AN" : "AUS"}`}>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                 <path
                     d="M12 2C12 2 5.5 9.5 5.5 14a6.5 6.5 0 0 0 13 0C18.5 9.5 12 2 12 2Z"
@@ -301,6 +721,62 @@ const AquaIcon = () => (
     </svg>
 );
 
+function onMuteButtonPointerDown(ev: Event) {
+    const t = ev.target as Element | null;
+    if (!t) return;
+    const btn = (t as Element).closest?.("button");
+    if (!btn) return;
+    const label = (btn.getAttribute("aria-label") || "").toLowerCase();
+    if (!(label.includes("mute") || label.includes("stumm"))) return;
+    reportDiscordMuteAfterClick();
+}
+
+const OVERRIDE_BUTTON_ID = "vc-aqua-sync-override";
+const OVERRIDE_ICON_IDLE = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M12 2C12 2 5.5 9.5 5.5 14a6.5 6.5 0 0 0 13 0C18.5 9.5 12 2 12 2Z\"/></svg>";
+const OVERRIDE_ICON_ACTIVE = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M12 2C12 2 5.5 9.5 5.5 14a6.5 6.5 0 0 0 13 0C18.5 9.5 12 2 12 2Z\" opacity=\"0.35\"/><path d=\"M4 4 L20 20\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\"/></svg>";
+
+function renderSyncOverrideState(button: HTMLButtonElement) {
+    const overrideActive = !syncEnabled;
+    const label = overrideActive
+        ? "Aqua-Override aktiv: Aufnahme läuft ohne Discord-Mute"
+        : "Aqua-Override: Aufnahme ohne Discord-Mute erlauben";
+    button.setAttribute("aria-checked", String(overrideActive));
+    button.setAttribute("aria-label", label);
+    button.title = label;
+    button.innerHTML = overrideActive ? OVERRIDE_ICON_ACTIVE : OVERRIDE_ICON_IDLE;
+}
+
+/** Small override beside Discord's own mute control: engaging it suspends the
+ *  Aqua→Discord auto-mute so a recording continues while the user stays
+ *  unmuted. Reuses toggleSync — the helper's ownership lifecycle is untouched. */
+function injectSyncOverrideButton() {
+    try {
+        const muteButton = getDomMuteButton();
+        if (!muteButton || muteButton.isConnected !== true) {
+            overrideButton?.remove();
+            overrideButton = null;
+            return;
+        }
+        if (overrideButton?.isConnected && overrideButton.previousElementSibling === muteButton) {
+            renderSyncOverrideState(overrideButton);
+            return;
+        }
+        overrideButton?.remove();
+        const button = document.createElement("button");
+        button.id = OVERRIDE_BUTTON_ID;
+        button.type = "button";
+        button.className = muteButton.className;
+        button.dataset.vcAquaOverride = "true";
+        button.setAttribute("role", "switch");
+        button.addEventListener("click", event => { event.stopPropagation(); toggleSync(); });
+        renderSyncOverrideState(button);
+        muteButton.insertAdjacentElement("afterend", button);
+        overrideButton = button;
+    } catch {}
+}
+
+const syncOverrideListener = () => { if (overrideButton?.isConnected) renderSyncOverrideState(overrideButton); };
+
 export default definePlugin({
     name: "AquaMuteSync",
     description: "Mutet Discord automatisch, solange Aqua Voice diktiert/aufnimmt (Sync mit lokalem aqua-watch-Helper), inkl. manuellem Toggle-Button und Drift-Schutz.",
@@ -318,35 +794,82 @@ export default definePlugin({
 
     start() {
         stopped = false;
+        console.info("[AquaMuteSync] plugin-start");
         // Laufzeit-Zustand zurücksetzen (Ownership kommt persistiert aus settings.store)
-        syncEnabled = true;
+        // Only an explicit persisted boolean enables automatic writers.
+        syncEnabled = settings.store.autoSync === true;
         helperConnected = false;
         helperDegraded = false;
         aquaRecording = false;
         lastSeq = -1;
+        latestStateSeq = null;
+        latestStateReceivedMonoMs = null;
+        latestStateIntent = null;
+        latestStateConfirmation = null;
+        latestHookSeq = null;
+        latestBridgeTuple = null;
+        activeBaselineProvenance = null;
         driftToastShown = false;
         statusClientSeq = 0;
         lastReportedMute = null;
-        clearTransitionMeasurement();
-        clearRestoreVerify();
-        MediaEngineStore.addChangeListener(onMediaEngineChange);
+        lastGetStateAt = 0;
+        // Only v1 state messages drive recording; polling remains drift-only.
+        const configuredPoll = Number(settings.store.pollIntervalMs);
+        settings.store.pollIntervalMs = Number.isFinite(configuredPoll)
+            ? Math.min(100, Math.max(25, configuredPoll))
+            : 50;
+        try {
+            getMediaEngineStore()?.addChangeListener?.(onMediaEngineChange);
+        } catch {}
+        try {
+            document.addEventListener("pointerdown", onMuteButtonPointerDown, true);
+        } catch {}
+        listeners.add(syncOverrideListener);
+        try { injectSyncOverrideButton(); } catch {}
+        try {
+            if (typeof MutationObserver !== "undefined" && document?.body) {
+                domObserver = new MutationObserver(() => reportDiscordMute());
+                domObserver.observe(document.body, {
+                    subtree: true,
+                    attributes: true,
+                    attributeFilter: ["aria-label", "aria-checked"]
+                });
+            }
+        } catch {}
         connect();
         pollTimer = setInterval(driftCheck, settings.store.pollIntervalMs);
     },
 
     stop() {
         stopped = true;
+        if (domObserver) {
+            domObserver.disconnect();
+            domObserver = null;
+        }
+        listeners.delete(syncOverrideListener);
+        overrideButton?.remove();
+        overrideButton = null;
         if (pollTimer) clearInterval(pollTimer);
+        try {
+            document.removeEventListener("pointerdown", onMuteButtonPointerDown, true);
+        } catch {}
         if (reconnectTimer) clearTimeout(reconnectTimer);
-        MediaEngineStore.removeChangeListener(onMediaEngineChange);
+        if (postClickReportTimer) clearTimeout(postClickReportTimer);
+        try {
+            getMediaEngineStore()?.removeChangeListener?.(onMediaEngineChange);
+        } catch {}
         clearTransitionMeasurement();
         clearRestoreVerify();
+        if (syncEnabled && settings.store.ownMute) operationalRestore();
         pollTimer = null;
         reconnectTimer = null;
+        postClickReportTimer = null;
+        latestStateSeq = null;
+        latestStateReceivedMonoMs = null;
+        latestStateIntent = null;
+        latestStateConfirmation = null;
+        latestHookSeq = null;
+        latestBridgeTuple = null;
         ws?.close();
-        if (settings.store.ownMute) {
-            // Plugin wird deaktiviert → Zustand zurückgeben
-            restorePreMute(false);
-        }
     }
 });
