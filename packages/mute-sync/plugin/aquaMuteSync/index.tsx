@@ -5,6 +5,7 @@
  */
 
 import { ChatBarButton } from "@api/ChatButtons";
+import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
 import definePlugin, { OptionType } from "@utils/types";
 import { React, showToast, Toasts } from "@webpack/common";
@@ -114,6 +115,48 @@ let activeBaselineProvenance: BridgeStateTuple | null = null;
  *  writes use btn.click(), which never dispatches pointerdown — so this only
  *  captures manual presses). Manual always wins for the rest of the cycle. */
 let manualClickMonoMs: number | null = null;
+/** One outage notification per disconnect phase (operator visibility rule). */
+let outageNotified = false;
+let degradedNotified = false;
+let startupProbeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function notifyHelperDown(reason: string) {
+    if (outageNotified) return;
+    outageNotified = true;
+    try {
+        showNotification({
+            title: "AquaMuteSync ❌ NICHT verbunden",
+            body: `${reason} — Aqua→Discord-Mute ist AUS. Klick hier: sofort neu verbinden. Wenn das nicht hilft, im Terminal: launchctl kickstart -k gui/501/org.n281.aqua-watch`,
+            permanent: true,
+            onClick: () => {
+                if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                connect();
+            }
+        });
+    } catch {}
+}
+
+function notifyHelperRestored() {
+    if (!outageNotified) return;
+    outageNotified = false;
+    try {
+        showNotification({
+            title: "AquaMuteSync ✅ verbunden",
+            body: "Helper wieder da — Aqua→Discord-Mute-Sync aktiv."
+        });
+    } catch {}
+}
+
+function notifyDegraded() {
+    if (degradedNotified) return;
+    degradedNotified = true;
+    try {
+        showNotification({
+            title: "AquaMuteSync ⚠️ degraded",
+            body: "CoreAudio-Eventkanal down — nur Datei-Fallback aktiv. Helper neu starten: launchctl kickstart -k gui/501/org.n281.aqua-watch"
+        });
+    } catch {}
+}
 
 const STATE_FRESH_MS = 1000;
 
@@ -328,6 +371,8 @@ function handleHelperState(message: unknown) {
     latestBridgeTuple = bridgeTupleFromState(state, receivedMonoMs);
     latestStateTuple = stateTupleFromState(state, receivedMonoMs);
     latestStateConfirmation = parseCoreAudioConfirmation(state.confirmation, latestStateSeq, state.recording, intent, receivedMonoMs);
+    if (state.degraded === true && !helperDegraded) notifyDegraded();
+    if (state.degraded !== true) degradedNotified = false;
     helperDegraded = state.degraded === true;
     helperConnected = true;
     reconcile(state.recording, latestStateSeq);
@@ -674,6 +719,7 @@ function connect() {
         helperConnected = true;
         statusClientSeq = 0;
         lastReportedMute = null;
+        notifyHelperRestored();
         publishAutoSync();
         reportDiscordMute(true);
         notify();
@@ -684,12 +730,14 @@ function connect() {
         } catch { /* ignore */ }
     };
     ws.onclose = () => {
+        const hadConnection = helperConnected;
         helperConnected = false;
         lastReportedMute = null;
         lastSeq = -1; // Helper-Neustart setzt seq zurück
         aquaRecording = false;
         latestStateTuple = null;
         activeBaselineProvenance = null;
+        if (!stopped && hadConnection) notifyHelperDown("Verbindung zum aqua-watch-Helper verloren");
         notify();
         // Sicher-Verhalten: gehaltenes Mute NICHT blind lösen — Zustand wird beim
         // Reconnect per state-Message neu synchronisiert (Spec: Reconnect-Szenario).
@@ -866,6 +914,13 @@ export default definePlugin({
         lastGetStateAt = 0;
         manualClickMonoMs = null;
         cachedMuteButton = null;
+        outageNotified = false;
+        degradedNotified = false;
+        if (startupProbeTimer) clearTimeout(startupProbeTimer);
+        startupProbeTimer = setTimeout(() => {
+            startupProbeTimer = null;
+            if (!stopped && !helperConnected) notifyHelperDown("Helper beim Start nicht erreichbar");
+        }, 8000);
         // Only v1 state messages drive recording; polling remains drift-only.
         const configuredPoll = Number(settings.store.pollIntervalMs);
         settings.store.pollIntervalMs = Number.isFinite(configuredPoll)
@@ -917,6 +972,8 @@ export default definePlugin({
         } catch {}
         if (reconnectTimer) clearTimeout(reconnectTimer);
         if (postClickReportTimer) clearTimeout(postClickReportTimer);
+        if (startupProbeTimer) clearTimeout(startupProbeTimer);
+        startupProbeTimer = null;
         try {
             getMediaEngineStore()?.removeChangeListener?.(onMediaEngineChange);
         } catch {}

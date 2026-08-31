@@ -37,14 +37,19 @@ function edgeReasons(frame, recording, route) {
 /** The same-clock hook reference for one edge, per route. */
 const hookRef = (frame, route) => route === 'bridge' ? frame.intent.hookMonoNs : frame.intent.intentMonoNs;
 
-/** Find the same-stateSeq hookless CoreAudio confirmation for one edge. */
-function findConfirmation(frames, fromIndex, endIndex, stateSeq, recording) {
+/** Find the hookless CoreAudio confirmation for one edge, correlated by the
+ *  UNCHANGED bridge intent hookSeq — app_state reports bump stateSeq between
+ *  the intent and Aqua's late CoreAudio echo (measured 1.1-1.3s), so stateSeq
+ *  equality would reject almost every real cycle. */
+function findConfirmation(frames, fromIndex, endIndex, hookSeq, recording) {
   for (let i = fromIndex; i < Math.min(endIndex, frames.length); i++) {
-    const c = frames[i]?.confirmation;
+    const f = frames[i];
+    const c = f?.confirmation;
     if (!c || c.source !== 'coreaudio') continue;
     if ('hookSeq' in c || 'hookMonoNs' in c) continue; // must be hookless
-    if (frames[i].stateSeq !== stateSeq || c.recording !== recording) continue;
-    return { frame: frames[i], confirmation: c };
+    if (f.intent?.source !== 'bridge' || f.intent?.hookSeq !== hookSeq) continue;
+    if (c.recording !== recording) continue;
+    return { frame: f, confirmation: c };
   }
   return null;
 }
@@ -112,8 +117,8 @@ export function framesToTrials(frames, { freshLimitMs = FRESH_LIMIT_MS, route = 
     let startConf = null;
     let stopConf = null;
     if (route === 'bridge') {
-      startConf = findConfirmation(frames, startIndex, stopIndex + 1, start.stateSeq, true);
-      stopConf = findConfirmation(frames, stopIndex, windowEnd, stop.stateSeq, false);
+      startConf = findConfirmation(frames, startIndex, stopIndex + 1, start.intent?.hookSeq, true);
+      stopConf = findConfirmation(frames, stopIndex, windowEnd, stop.intent?.hookSeq, false);
       if (!startConf || !stopConf) reasons.add('confirmation_mismatch');
     }
 

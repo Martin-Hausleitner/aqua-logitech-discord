@@ -1,6 +1,10 @@
 export const STATUS_PROTOCOL_VERSION = 1;
 /** Ignore CoreAudio/poll that disagrees with a recent button-bridge command. */
 export const BRIDGE_LATCH_MS = 750;
+/** A bridge/control command with no CoreAudio echo by this deadline rolls
+ *  back — a stray key hint must never leave Discord inverted. Aqua's own
+ *  key->CoreAudio reaction was measured at 1.1-1.3s, so allow headroom. */
+export const CONFIRM_DEADLINE_MS = 2500;
 
 const DEFAULT_APPS = ["discord"];
 const COMMAND_SOURCES = new Set(["bridge", "control"]);
@@ -18,6 +22,7 @@ export class StatusState {
         this.intent = null;
         this.confirmation = null;
         this.controlRelays = 0;
+        this.pendingCommand = null;
         this.apps = new Map(apps.map(app => [app, {
             muted: null,
             online: false,
@@ -47,7 +52,7 @@ export class StatusState {
     }
 
     isBridgeLatched(recording, source) {
-        if (COMMAND_SOURCES.has(source)) return false;
+        if (COMMAND_SOURCES.has(source) || source === "rollback") return false;
         if (this.lastBridgeRecording === null) return false;
         const ts = this.now();
         return (ts - this.lastBridgeAt) < BRIDGE_LATCH_MS
@@ -55,7 +60,7 @@ export class StatusState {
     }
 
     setRecording(recording, source, metadata = {}) {
-        if (typeof recording !== "boolean" || !COMMAND_SOURCES.has(source) && !["coreaudio", "poll:mic_timings", "poll:wav", "poll:stale"].includes(source)) return false;
+        if (typeof recording !== "boolean" || !COMMAND_SOURCES.has(source) && !["coreaudio", "poll:mic_timings", "poll:wav", "poll:stale", "rollback"].includes(source)) return false;
         if (metadata?.hookSeq !== undefined && !(Number.isSafeInteger(metadata.hookSeq) && metadata.hookSeq >= 0)) return false;
         if (metadata?.hookMonoNs !== undefined && !(typeof metadata.hookMonoNs === "string" && /^\d+$/.test(metadata.hookMonoNs))) return false;
         const ts = this.now();
@@ -72,6 +77,7 @@ export class StatusState {
             if (source === "coreaudio") {
                 // Agreement, not a transition: this evidence is the hookless
                 // CoreAudio confirmation and carries the confirmation stamp.
+                this.pendingCommand = null;
                 evidence.confirmationMonoNs = this.monoNow();
                 const changed = JSON.stringify(this.confirmation) !== JSON.stringify(evidence);
                 this.confirmation = evidence;
@@ -83,12 +89,23 @@ export class StatusState {
         // (coreaudio) path has no bridge hookMonoNs, so the helper's own mach
         // stamp is the measurable transition anchor.
         evidence.intentMonoNs = this.monoNow();
+        this.pendingCommand = COMMAND_SOURCES.has(source)
+            ? { recording, prev: this.recording, at: ts }
+            : null;
         this.recording = recording;
         this.source = source;
         this.intent = evidence;
         this.confirmation = null;
         this.seq++;
         return true;
+    }
+
+    /** Bridge/control transition past the confirm deadline with no CoreAudio
+     *  echo -> the caller should roll back to the prior state. */
+    unconfirmedCommand(now = this.now()) {
+        if (!this.pendingCommand) return null;
+        if (now - this.pendingCommand.at < CONFIRM_DEADLINE_MS) return null;
+        return this.pendingCommand;
     }
 
     /** A competing control route (set_mute/toggle_mute/aqua_toggle relay) fired. */

@@ -1,16 +1,20 @@
 // aqua-key-hint — listen-only CGEventTap for Aqua's LOCK keys (right Command /
-// right Control). Emits "LOCKTAP <keycode>" for a clean solo tap so the bridge
-// can fire the Discord mute signal PARALLEL to Aqua's own ~300-400ms mic-open,
-// instead of serially after it (measured: mic_timings.json p50 328-403ms).
+// right Control). v2: fires on key-DOWN for minimum latency and emits an
+// explicit abort when the press turns out to be a combo or a long hold, so the
+// bridge can revert its optimistic flip immediately.
 //
-// Safety: .listenOnly — never modifies, blocks, or injects events. Combo
-// presses (e.g. RightCmd+C) never fire. Drift authority stays with the
-// helper's bridge latch + CoreAudio correction.
+// Protocol (stdout, line-based):
+//   READY            tap installed
+//   LOCKDOWN <kc>    lock key went down alone — bridge flips NOW
+//   LOCKTAP <kc>     released alone within the tap window — flip confirmed
+//   LOCKABORT <kc>   combo/long-hold/second-modifier — bridge reverts the flip
+//
+// Safety: .listenOnly — never modifies, blocks, or injects events. Drift
+// authority stays with the helper (bridge latch + CoreAudio + rollback).
 //
 // Build: swiftc -O -framework CoreGraphics -framework Foundation \
 //          -o ../bin/aqua-key-hint aqua-key-hint.swift
-// Exit 78 = Input-Monitoring permission missing (System Settings → Privacy &
-// Security → Input Monitoring → allow aqua-key-hint).
+// Exit 78 = Input-Monitoring permission missing.
 
 import CoreGraphics
 import Foundation
@@ -21,10 +25,16 @@ let maxTapMs = 500.0
 
 var pendingKey: Int64? = nil
 var pendingDownAtMs = 0.0
-var comboSeen = false
 
 func emit(_ line: String) {
     FileHandle.standardOutput.write((line + "\n").data(using: .utf8)!)
+}
+
+func abortPending() {
+    if let key = pendingKey {
+        emit("LOCKABORT \(key)")
+        pendingKey = nil
+    }
 }
 
 let mask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
@@ -36,26 +46,37 @@ guard let tap = CGEvent.tapCreate(
     eventsOfInterest: mask,
     callback: { _, type, event, _ in
         if type == .keyDown {
-            // Any real key while a lock key is held makes it a combo, not a tap.
-            comboSeen = true
+            // A real key while a lock key is pending = combo (e.g. RightCmd+C).
+            abortPending()
             return Unmanaged.passUnretained(event)
         }
         let keycode = event.getIntegerValueField(.keyboardEventKeycode)
+        let nowMs = Date().timeIntervalSince1970 * 1000
         if keycode == rightCommand || keycode == rightControl {
             let isDown = keycode == rightCommand
                 ? event.flags.contains(.maskCommand)
                 : event.flags.contains(.maskControl)
-            let nowMs = Date().timeIntervalSince1970 * 1000
             if isDown {
+                if pendingKey != nil && pendingKey != keycode {
+                    // Second lock modifier joined (RightCmd then RightCtrl):
+                    // combo — revert the first, never fire the second.
+                    abortPending()
+                    return Unmanaged.passUnretained(event)
+                }
                 pendingKey = keycode
                 pendingDownAtMs = nowMs
-                comboSeen = false
+                emit("LOCKDOWN \(keycode)")
             } else if pendingKey == keycode {
-                if !comboSeen && nowMs - pendingDownAtMs < maxTapMs {
+                if nowMs - pendingDownAtMs < maxTapMs {
                     emit("LOCKTAP \(keycode)")
+                    pendingKey = nil
+                } else {
+                    abortPending() // long hold is not a lock tap
                 }
-                pendingKey = nil
             }
+        } else {
+            // Any OTHER modifier changing while pending = combo.
+            abortPending()
         }
         return Unmanaged.passUnretained(event)
     },

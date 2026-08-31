@@ -51,3 +51,39 @@ test('reportApp rejects stale client sequence metadata', () => {
     app: 'discord', muted: false, clientSeq: 2, stateSeq: 2,
   }), false);
 });
+
+test('an unconfirmed bridge command rolls back after the deadline and CoreAudio echoes clear it', async () => {
+  const { CONFIRM_DEADLINE_MS } = await import('./status-state.mjs');
+  let t = 1000;
+  const state = new StatusState({ now: () => t, monoNow: () => '1' });
+  state.setRecording(true, 'bridge', { hookSeq: 1, hookMonoNs: '10' });
+  t = 1000 + CONFIRM_DEADLINE_MS - 1;
+  assert.equal(state.unconfirmedCommand(), null, 'inside the deadline nothing rolls back');
+  t = 1000 + CONFIRM_DEADLINE_MS + 1;
+  const pending = state.unconfirmedCommand();
+  assert.deepEqual({ recording: pending.recording, prev: pending.prev }, { recording: true, prev: false });
+  // rollback source is accepted, bypasses the latch, and clears the pending command
+  assert.equal(state.setRecording(pending.prev, 'rollback'), true);
+  assert.equal(state.recording, false);
+  assert.equal(state.unconfirmedCommand(), null);
+});
+
+test('a timely CoreAudio agreement clears the pending command', () => {
+  let t = 1000;
+  const state = new StatusState({ now: () => t, monoNow: () => '1' });
+  state.setRecording(true, 'bridge', { hookSeq: 1, hookMonoNs: '10' });
+  t = 2200;
+  state.setRecording(true, 'coreaudio');
+  t = 999999;
+  assert.equal(state.unconfirmedCommand(), null);
+});
+
+test('a CoreAudio transition also clears the pending command', () => {
+  let t = 1000;
+  const state = new StatusState({ now: () => t, monoNow: () => '1' });
+  state.setRecording(false, 'bridge', { hookSeq: 2, hookMonoNs: '20' });
+  t = 1800; // after latch, disagreeing coreaudio may transition
+  state.setRecording(true, 'coreaudio');
+  t = 999999;
+  assert.equal(state.unconfirmedCommand(), null);
+});

@@ -164,6 +164,11 @@ let lastTimings = mtimeOf(MIC_TIMINGS);
 let lastWav = newestWav();
 
 setInterval(() => {
+    const unconfirmed = status.unconfirmedCommand();
+    if (unconfirmed) {
+        log(`rollback: ${unconfirmed.recording} unconfirmed for ${Date.now() - unconfirmed.at}ms -> ${unconfirmed.prev}`);
+        setRecording(unconfirmed.prev, "rollback");
+    }
     const t = mtimeOf(MIC_TIMINGS);
     const w = newestWav();
     if (t > lastTimings) {

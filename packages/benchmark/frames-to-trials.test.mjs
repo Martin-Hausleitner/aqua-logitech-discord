@@ -278,3 +278,16 @@ test('summarizeShortcutRun stays red below 25 cycles and reports honest percenti
   assert.equal(green.restorePercentiles.p50, 60);
   assert.deepEqual(green.invalidCycles, converted.invalid);
 });
+
+test('bridge route: a late CoreAudio echo after an app_state stateSeq bump still confirms via the unchanged hookSeq', () => {
+  resetSeq();
+  const { frames } = validCycle(1000, 40);
+  // Discord's mute report bumps stateSeq BEFORE Aqua's echo arrives (real
+  // trace: echo +1.1-1.3s). Move both confirmations onto bumped-seq frames.
+  frames[2].confirmation = null; // early same-seq confirmation gone
+  frames[3].confirmation = { recording: true, source: 'coreaudio', confirmationMonoNs: String(BigInt(1500) * NS) }; // lives on the bumped mute frame
+  const { trials, invalid } = framesToTrials(frames);
+  assert.deepEqual(invalid, []);
+  assert.equal(trials.length, 1);
+  assert.equal(trials[0].hookStartToCoreAudioMs, 500);
+});

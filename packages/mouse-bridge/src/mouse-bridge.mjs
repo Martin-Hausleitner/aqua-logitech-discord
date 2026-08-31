@@ -49,7 +49,7 @@ let watchWs = null;
  *  Aqua reacts to the same physical key itself; we never send it a keystroke. */
 const KEY_HINT_ENABLED = process.env.AQUA_KEY_HINT !== "0";
 const KEY_HINT_BIN = join(ROOT, "bin", "aqua-key-hint");
-const keyHint = { running: false, taps: 0, lastTapAt: 0, denied: false };
+const keyHint = { running: false, taps: 0, aborts: 0, lastTapAt: 0, denied: false, pendingFlip: null };
 
 function startKeyHint() {
   if (!KEY_HINT_ENABLED) return;
@@ -74,13 +74,24 @@ function startKeyHint() {
       if (line === "READY") {
         keyHint.running = true;
         keyHint.denied = false;
-        log("key-hint ready (right-cmd/right-ctrl lock taps)");
-      } else if (line.startsWith("LOCKTAP")) {
+        log("key-hint ready (right-cmd/right-ctrl lock taps, fire-on-down)");
+      } else if (line.startsWith("LOCKDOWN")) {
+        // Optimistic flip at key-DOWN: minimum latency. A combo/long-hold
+        // aborts below; the helper's unconfirmed-rollback is the final net.
         keyHint.taps++;
         keyHint.lastTapAt = Date.now();
-        // Parallel mute signal: Aqua toggles itself on this same key press.
-        notifySameButton(!aquaRecording);
-        log("key-hint", line, `-> set_recording=${!aquaRecording}`);
+        keyHint.pendingFlip = !aquaRecording;
+        notifySameButton(keyHint.pendingFlip);
+        log("key-hint", line, `-> set_recording=${keyHint.pendingFlip}`);
+      } else if (line.startsWith("LOCKTAP")) {
+        keyHint.pendingFlip = null; // clean tap — the down-flip stands
+      } else if (line.startsWith("LOCKABORT")) {
+        if (keyHint.pendingFlip !== null && keyHint.pendingFlip !== undefined) {
+          keyHint.aborts++;
+          notifySameButton(!keyHint.pendingFlip);
+          log("key-hint", line, `-> revert set_recording=${!keyHint.pendingFlip}`);
+          keyHint.pendingFlip = null;
+        }
       }
     }
   });

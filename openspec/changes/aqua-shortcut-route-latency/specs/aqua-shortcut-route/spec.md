@@ -97,3 +97,62 @@ toggle.
 
 - **WHEN** right Command is held together with another key (e.g. Cmd+C)
 - **THEN** the listener fires no toggle
+
+#### Scenario: Two lock modifiers pressed in sequence
+
+- **WHEN** a second modifier goes down while a lock key is pending (e.g.
+  right Command held, then right Control)
+- **THEN** the pending hint is aborted and any already-fired flip is reverted
+
+### Requirement: Fire on key-down with abort-revert
+
+The listener SHALL fire the hint on key-DOWN (not on release) to remove the
+tap-hold time from the latency, and MUST revert the flip immediately when the
+press turns out to be a combo or a long hold.
+
+#### Scenario: Clean tap
+
+- **WHEN** a lock key goes down and is released alone within the tap window
+- **THEN** the flip fired at down-time stands and is confirmed
+
+#### Scenario: Press becomes a combo after the flip
+
+- **WHEN** another key or modifier joins before release
+- **THEN** the bridge sends the reverse recording value immediately
+
+### Requirement: Unconfirmed command rollback
+
+The helper SHALL roll back a bridge/control-sourced recording transition
+that receives no CoreAudio confirmation or transition within a bounded
+deadline, so a stray hint can never leave Discord inverted relative to the
+real recording state.
+
+#### Scenario: Hint fires but Aqua does not react
+
+- **WHEN** a bridge-sourced transition stays unconfirmed past the deadline
+- **THEN** the helper restores the prior recording state with a distinct
+  `rollback` source and broadcasts it
+
+#### Scenario: Aqua confirms in time
+
+- **WHEN** CoreAudio agreement or transition arrives within the deadline
+- **THEN** no rollback occurs
+
+### Requirement: Visible disconnect state with recovery action
+
+The plugin SHALL show a Discord-native notification when the helper
+connection is lost, degraded, or never establishes, naming the broken state
+and offering a click action that retries the connection immediately; a
+reconnect SHALL be confirmed visibly. Notifications MUST NOT spam (one per
+outage phase).
+
+#### Scenario: Helper offline
+
+- **WHEN** the helper socket closes and stays down
+- **THEN** one permanent notification appears with a reconnect click action
+  and the recovery command in its body
+
+#### Scenario: Connection restored
+
+- **WHEN** the socket reconnects after an outage notification
+- **THEN** a short success notification confirms sync is active again
