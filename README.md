@@ -72,12 +72,15 @@ only when every trial has an actual Discord confirmation and restores the
 original mute state. A software endpoint run is not proof of physical
 button-to-audio latency.
 
-## Aqua hotkeys (current machine)
+`packages/benchmark/jsonl-cycles.mjs` performs the strict offline analysis. It
+accepts the observer's real `appStateSeq`, intent, confirmation, and Discord
+metadata, rejects malformed or regressing sequences, and only accepts a run
+after five qualified warmups plus at least twenty qualified measured cycles.
 
-From `~/Library/Application Support/Aqua Voice/settings.json`:
+## Aqua key contract
 
-- `Fn` → activate (PTT)
-- `MetaRight` / `AltRight` → lock (toggle)
+- `Fn` → activate (PTT), when configured in Aqua Voice
+- `MetaRight` / `AltRight` → lock (toggle), when configured in Aqua Voice
 - Synthetic **Fn via HID event tap works**; System Events Fn does **not**
 
 ## Honest status vs requirements
@@ -98,7 +101,6 @@ From `~/Library/Application Support/Aqua Voice/settings.json`:
 4. Grant **Accessibility** to Terminal/node/`hid-tap` as prompted.
 5. Smoke-test: `curl -X POST http://127.0.0.1:8690/button1` twice with focus in a text field.
 
-## Source repos (do not delete)
+## Related public repositories
 
-- Local: `~/code/vencord-aqua-mute`, `~/code/aqua-mute-sync`, `~/code/aqua-voice-exporter`, `~/code/vencord-stream-pip`, `~/Vencord`
 - GitHub: https://github.com/Martin-Hausleitner/aqua-mute-sync · https://github.com/Martin-Hausleitner/aqua-voice-exporter
