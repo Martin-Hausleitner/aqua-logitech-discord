@@ -44,6 +44,60 @@ let busy = false;
 let aquaRecording = false;
 let watchWs = null;
 
+/** aqua-key-hint: LOCK-key tap fires the mute signal parallel to Aqua's
+ *  ~300-400ms mic-open (see docs/PHYSICAL-RUN-RUNBOOK.md). Toggle intent only —
+ *  Aqua reacts to the same physical key itself; we never send it a keystroke. */
+const KEY_HINT_ENABLED = process.env.AQUA_KEY_HINT !== "0";
+const KEY_HINT_BIN = join(ROOT, "bin", "aqua-key-hint");
+const keyHint = { running: false, taps: 0, lastTapAt: 0, denied: false };
+
+function startKeyHint() {
+  if (!KEY_HINT_ENABLED) return;
+  if (!existsSync(KEY_HINT_BIN)) {
+    log("key-hint binary missing — run swiftc build (see aqua-key-hint.swift)");
+    return;
+  }
+  let child;
+  try {
+    child = spawn(KEY_HINT_BIN, [], { stdio: ["ignore", "pipe", "pipe"] });
+  } catch (e) {
+    log("key-hint spawn failed:", e.message);
+    return;
+  }
+  let buf = "";
+  child.stdout.on("data", (d) => {
+    buf += d.toString();
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (line === "READY") {
+        keyHint.running = true;
+        keyHint.denied = false;
+        log("key-hint ready (right-cmd/right-ctrl lock taps)");
+      } else if (line.startsWith("LOCKTAP")) {
+        keyHint.taps++;
+        keyHint.lastTapAt = Date.now();
+        // Parallel mute signal: Aqua toggles itself on this same key press.
+        notifySameButton(!aquaRecording);
+        log("key-hint", line, `-> set_recording=${!aquaRecording}`);
+      }
+    }
+  });
+  child.stderr.on("data", (d) => {
+    const msg = d.toString().trim();
+    if (msg.includes("TCC_DENIED")) {
+      keyHint.denied = true;
+      log("key-hint DENIED — System Settings > Privacy & Security > Input Monitoring > allow aqua-key-hint");
+    } else if (msg) log("key-hint:", msg);
+  });
+  child.on("exit", (code) => {
+    keyHint.running = false;
+    log(`key-hint exited (${code}) — retry in 30s`);
+    setTimeout(startKeyHint, 30_000);
+  });
+}
+
 async function hid(...args) {
   if (DRY) {
     log("DRY hid-tap", ...args);
@@ -335,6 +389,7 @@ const server = createServer(async (req, res) => {
       busy,
       aquaRecording,
       watchLinked: !!watchWs && watchWs.readyState === 1,
+      keyHint,
       dry: DRY,
       metrics: {
         ...metrics,
@@ -377,6 +432,7 @@ server.listen(PORT, "127.0.0.1", () => {
   log(`mouse-bridge on http://127.0.0.1:${PORT}`);
   log(`hid-tap: ${existsSync(HID) ? HID : "MISSING"} dry=${DRY} toggle=${TOGGLE_MODE}`);
   connectWatch();
+  startKeyHint();
 });
 
 for (const sig of ["SIGINT", "SIGTERM"]) {

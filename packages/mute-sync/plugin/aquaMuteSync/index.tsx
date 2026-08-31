@@ -110,6 +110,10 @@ let latestHookSeq: number | null = null;
 let latestBridgeTuple: BridgeStateTuple | null = null;
 let latestStateTuple: BridgeStateTuple | null = null;
 let activeBaselineProvenance: BridgeStateTuple | null = null;
+/** performance.now() of the last REAL user click on the mute control (plugin
+ *  writes use btn.click(), which never dispatches pointerdown — so this only
+ *  captures manual presses). Manual always wins for the rest of the cycle. */
+let manualClickMonoMs: number | null = null;
 
 const STATE_FRESH_MS = 1000;
 
@@ -185,10 +189,16 @@ const getMediaEngineStore = () => {
     return null;
 };
 
+let cachedMuteButton: HTMLButtonElement | null = null;
+
 function getDomMuteButton(): HTMLButtonElement | null {
     try {
+        // Hot path stays O(1): re-query the full DOM only when the cached
+        // control is gone or no longer a self-mute control.
+        if (cachedMuteButton?.isConnected === true && isSelfMuteButton(cachedMuteButton)) return cachedMuteButton;
         const buttons = document.querySelectorAll<HTMLButtonElement>("button[aria-label]");
-        return Array.from(buttons).find(isSelfMuteButton) ?? null;
+        cachedMuteButton = Array.from(buttons).find(isSelfMuteButton) ?? null;
+        return cachedMuteButton;
     } catch {
         return null;
     }
@@ -565,6 +575,11 @@ function restorePreMute(verifyAfterOneSecond: boolean, operational = false) {
     restoreVerifyTimer = setTimeout(() => {
         restoreVerifyTimer = null;
         if (aquaRecording || !settings.store.ownMute) return;
+        if (manualClickMonoMs !== null && manualClickMonoMs >= startedAt) {
+            // The user re-decided inside the verify window — do not correct.
+            clearPersistedBaseline();
+            return;
+        }
         const observed = isSelfMute();
         const corrected = observed !== null && observed !== target;
         if (corrected) setSelfMute(target);
@@ -603,6 +618,7 @@ function reconcile(rec: boolean, seq: number) {
     }
     aquaRecording = rec;
     driftToastShown = false;
+    if (rec) manualClickMonoMs = null; // a new cycle re-arms auto-sync
     notify();
     if (!syncEnabled) return;
 
@@ -631,6 +647,7 @@ function driftCheck() {
     reportDiscordMute();
     const observed = isSelfMute();
     if (aquaRecording && helperConnected && observed === false) {
+        if (manualClickMonoMs !== null) return; // manual exception wins
         if (!settings.store.ownMute) {
             if (!captureActualBaseline(currentStateTuple(true), observed)) return;
         } else if (!activeBaselineProvenance) {
@@ -749,8 +766,18 @@ function onMuteButtonPointerDown(ev: Event) {
     if (!t) return;
     const btn = (t as Element).closest?.("button");
     if (!btn) return;
+    if ((btn as HTMLElement).dataset?.vcAquaOverride === "true") return;
     const label = (btn.getAttribute("aria-label") || "").toLowerCase();
     if (!(label.includes("mute") || label.includes("stumm"))) return;
+    manualClickMonoMs = performance.now();
+    if (settings.store.ownMute) {
+        // Manual always wins: the user took over this cycle. Never fight back
+        // with drift re-mute, restore, or delayed verify (forced-mute-loop ban).
+        clearTransitionMeasurement();
+        clearRestoreVerify();
+        clearPersistedBaseline();
+        console.info("[AquaMuteSync] manual-mute-click — ownership released for this cycle");
+    }
     reportDiscordMuteAfterClick();
 }
 
@@ -837,6 +864,8 @@ export default definePlugin({
         statusClientSeq = 0;
         lastReportedMute = null;
         lastGetStateAt = 0;
+        manualClickMonoMs = null;
+        cachedMuteButton = null;
         // Only v1 state messages drive recording; polling remains drift-only.
         const configuredPoll = Number(settings.store.pollIntervalMs);
         settings.store.pollIntervalMs = Number.isFinite(configuredPoll)
@@ -852,7 +881,16 @@ export default definePlugin({
         try { injectSyncOverrideButton(); } catch {}
         try {
             if (typeof MutationObserver !== "undefined" && document?.body) {
-                domObserver = new MutationObserver(() => reportDiscordMute());
+                // Voice channels storm aria attributes; never scan per batch.
+                let mutationReportPending = false;
+                domObserver = new MutationObserver(() => {
+                    if (mutationReportPending) return;
+                    mutationReportPending = true;
+                    setTimeout(() => {
+                        mutationReportPending = false;
+                        reportDiscordMute();
+                    }, 50);
+                });
                 domObserver.observe(document.body, {
                     subtree: true,
                     attributes: true,

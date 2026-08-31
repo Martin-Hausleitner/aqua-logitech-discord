@@ -24,7 +24,7 @@ async function loadActual({ buttons = [], store = null } = {}) {
     );
     const beforePlugin = withoutSettings.slice(0, withoutSettings.indexOf("export default definePlugin({"));
     const testSurface = `${beforePlugin}
-globalThis.__aqua = { getDomMuteButton, getDomMuteState, getObservedSelfMute, getControlSelfMute, isSelfMute, reportDiscordMute, beginRecordingMute, restorePreMute, setSelfMute, driftCheck, toggleSync, reconcile, publishAutoSync, injectSyncOverrideButton, renderSyncOverrideState, getOverrideButton: () => overrideButton, getSyncEnabled: () => syncEnabled, setWs: value => ws = value, getSettings: () => settings.store, getRuntime: () => ({ aquaRecording, helperConnected, helperDegraded, latestStateSeq, latestHookSeq, latestStateIntent, latestStateConfirmation, latestBridgeTuple }), setRuntime: value => { if (typeof value.aquaRecording === "boolean") aquaRecording = value.aquaRecording; if (typeof value.helperConnected === "boolean") helperConnected = value.helperConnected; }, getTestApi: () => ({ operationalRestore: typeof operationalRestore === "function" ? operationalRestore : null, handleHelperState: typeof handleHelperState === "function" ? handleHelperState : null, handleIncomingMessage: typeof handleIncomingMessage === "function" ? handleIncomingMessage : null, qualifyTransition: typeof qualifyTransition === "function" ? qualifyTransition : null, measureTransition: typeof measureTransition === "function" ? measureTransition : null }) };
+globalThis.__aqua = { getDomMuteButton, getDomMuteState, getObservedSelfMute, getControlSelfMute, isSelfMute, reportDiscordMute, beginRecordingMute, restorePreMute, setSelfMute, driftCheck, toggleSync, reconcile, publishAutoSync, injectSyncOverrideButton, renderSyncOverrideState, onMuteButtonPointerDown, getManualClick: () => manualClickMonoMs, getOverrideButton: () => overrideButton, getSyncEnabled: () => syncEnabled, setWs: value => ws = value, getSettings: () => settings.store, getRuntime: () => ({ aquaRecording, helperConnected, helperDegraded, latestStateSeq, latestHookSeq, latestStateIntent, latestStateConfirmation, latestBridgeTuple }), setRuntime: value => { if (typeof value.aquaRecording === "boolean") aquaRecording = value.aquaRecording; if (typeof value.helperConnected === "boolean") helperConnected = value.helperConnected; }, getTestApi: () => ({ operationalRestore: typeof operationalRestore === "function" ? operationalRestore : null, handleHelperState: typeof handleHelperState === "function" ? handleHelperState : null, handleIncomingMessage: typeof handleIncomingMessage === "function" ? handleIncomingMessage : null, qualifyTransition: typeof qualifyTransition === "function" ? qualifyTransition : null, measureTransition: typeof measureTransition === "function" ? measureTransition : null }) };
 `;
     const compiled = await transform(testSurface, { loader: "tsx", format: "iife", target: "es2020" });
     const sent = [];
@@ -550,4 +550,65 @@ test("drift loop reconciles the override control before the sync gate and lifecy
     const stopBody = source.slice(source.indexOf("stop() {"));
     assert.match(stopBody, /listeners\.delete\(syncOverrideListener\)/);
     assert.match(stopBody, /overrideButton\?\.remove\(\)/);
+});
+
+function manualClickEvent(label = "Unmute") {
+    const btn = {
+        dataset: {},
+        getAttribute: name => name === "aria-label" ? label : null
+    };
+    return { target: { closest: () => btn } };
+}
+
+test("executes the manual exception: a user mute click mid-recording releases ownership and drift never re-mutes", async () => {
+    const fixture = button("Mute", "false");
+    const { aqua, runTimers } = await loadActual({ buttons: [fixture] });
+    aqua.getTestApi().handleHelperState(coreaudioState({ seq: 5, recording: true }));
+    assert.equal(fixture.clicks, 1);
+    assert.equal(aqua.getSettings().ownMute, true);
+    aqua.onMuteButtonPointerDown(manualClickEvent("Unmute"));
+    assert.notEqual(aqua.getManualClick(), null);
+    assert.equal(aqua.getSettings().ownMute, false, "manual click must release ownership");
+    aqua.setRuntime({ aquaRecording: true, helperConnected: true });
+    aqua.driftCheck();
+    aqua.driftCheck();
+    runTimers();
+    assert.equal(fixture.clicks, 1, "no forced re-mute after the manual exception");
+    assert.equal(aqua.getSettings().ownMute, false);
+});
+
+test("executes the manual exception: a click inside the restore-verify window is never corrected", async () => {
+    const fixture = button("Unmute", "true");
+    const { aqua, runTimers } = await loadActual({ buttons: [fixture] });
+    const api = aqua.getTestApi();
+    api.handleHelperState(coreaudioState({ seq: 5, recording: true }));
+    assert.equal(aqua.getSettings().preMute, true);
+    api.handleHelperState(coreaudioState({ seq: 6, recording: false }));
+    fixture.setChecked("false");
+    aqua.onMuteButtonPointerDown(manualClickEvent("Mute"));
+    runTimers();
+    assert.equal(fixture.clicks, 0, "verify must not fight the user's manual choice");
+    assert.equal(aqua.getSettings().ownMute, false);
+    assert.equal(aqua.getObservedSelfMute(), false);
+});
+
+test("a new recording cycle re-arms auto-sync after a manual exception", async () => {
+    const fixture = button("Mute", "false");
+    const { aqua } = await loadActual({ buttons: [fixture] });
+    const api = aqua.getTestApi();
+    api.handleHelperState(coreaudioState({ seq: 5, recording: true }));
+    aqua.onMuteButtonPointerDown(manualClickEvent("Unmute"));
+    api.handleHelperState(coreaudioState({ seq: 6, recording: false }));
+    api.handleHelperState(coreaudioState({ seq: 7, recording: true }));
+    assert.equal(aqua.getManualClick(), null, "new cycle clears the manual exception");
+    assert.equal(fixture.clicks, 2, "auto-mute engages again on the next cycle");
+    assert.equal(aqua.getSettings().ownMute, true);
+});
+
+test("keeps the hot observation path cheap and the override button out of manual-click detection", () => {
+    assert.match(source, /cachedMuteButton\?\.isConnected === true/);
+    assert.match(source, /mutationReportPending/);
+    const pointer = functionBody("onMuteButtonPointerDown");
+    assert.match(pointer, /vcAquaOverride === "true"/);
+    assert.match(pointer, /manual-mute-click/);
 });

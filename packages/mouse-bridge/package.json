@@ -6,7 +6,7 @@
   "description": "Logitech G Pro side-button → Aqua Voice + post-transcription Enter",
   "scripts": {
     "start": "node src/mouse-bridge.mjs",
-    "test": "node --test src/state-machine.test.mjs src/settle.test.mjs src/mouse-bridge.test.mjs src/hid-semantic-decoder.test.mjs src/decode-capture.test.mjs",
+    "test": "node --test src/state-machine.test.mjs src/settle.test.mjs src/mouse-bridge.test.mjs src/hid-semantic-decoder.test.mjs src/decode-capture.test.mjs src/key-hint.test.mjs",
     "capture-receiver": "./scripts/capture-receiver.sh"
   },
   "engines": {
