@@ -92,12 +92,13 @@ export async function waitUntilSettled(opts) {
     isRecording,
     readSignals,
     readClipboard,
-    minAfterStopMs = 200,
-    postTranscriptMs = 350,
-    maxWaitMs = 45_000,
-    pollMs = 100,
+    signal,
+    minAfterStopMs = 25,
+    postTranscriptMs = 60,
+    maxWaitMs = 6000,
+    pollMs = 15,
     allowQuietFallback = false,
-    minQuietMs = 8_000,
+    minQuietMs = 2000,
     log = () => {},
   } = opts;
 
@@ -110,6 +111,11 @@ export async function waitUntilSettled(opts) {
   let transcriptReason = null;
 
   while (Date.now() - t0 < maxWaitMs) {
+    if (signal?.aborted) {
+      log("settle: aborted by signal");
+      return { ok: false, reason: "aborted", waitedMs: Date.now() - t0 };
+    }
+
     const recording = !!isRecording();
     if (recording) {
       sawRecording = true;

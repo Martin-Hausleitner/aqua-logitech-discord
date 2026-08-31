@@ -38,7 +38,13 @@ export function reduce(state, event) {
   const actions = [];
 
   switch (event.type) {
-    case "BUTTON1_TAP": {
+    case "BUTTON1_TAP":
+    case "SHORTCUT_LEFT":
+    case "SHORTCUT_RIGHT": {
+      let enterStr = "ENTER";
+      if (event.type === "SHORTCUT_LEFT") enterStr = "ENTER_NONE";
+      if (event.type === "SHORTCUT_RIGHT") enterStr = "ENTER_FORCE";
+
       if (next.mode === Mode.PTT_HOLDING) {
         // Ignore toggle while PTT is physically held
         return { state: next, actions };
@@ -50,7 +56,7 @@ export function reduce(state, event) {
         next.mode = Mode.WAITING_SETTLE;
         next.settleReason = "toggle_stop";
         next.pendingEnterAfterPtt = false;
-        actions.push("TOGGLE_STOP", "WAIT_SETTLE", "ENTER");
+        actions.push("TOGGLE_STOP", "WAIT_SETTLE", enterStr);
         return { state: next, actions };
       }
       // idle
@@ -58,7 +64,7 @@ export function reduce(state, event) {
         next.mode = Mode.WAITING_SETTLE;
         next.settleReason = "ptt_followup_enter";
         next.pendingEnterAfterPtt = false;
-        actions.push("WAIT_SETTLE", "ENTER");
+        actions.push("WAIT_SETTLE", enterStr);
         return { state: next, actions };
       }
       next.mode = Mode.TOGGLE_RECORDING;
