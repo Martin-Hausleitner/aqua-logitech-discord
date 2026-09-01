@@ -28,17 +28,21 @@
 
 ## 7. Key-hook parallel trigger (right Cmd/Ctrl lock keys)
 
-- [ ] 7.1 Listen-only key tap (Swift CGEventTap, tap-vs-combo discrimination) + bridge wiring to helper set_recording
+- [x] 7.1 Listen-only key tap (Swift CGEventTap, tap-vs-combo discrimination) + bridge wiring to helper set_recording
 - [ ] 7.2 Deployed behind TCC Input-Monitoring grant (operator clicks the system prompt); latch/CoreAudio correction verified
 
 ## 8. Sichtbarkeit (Operator 01:45: Pop-up bei nicht verbunden + Start-Aktion)
 
-- [ ] 8.1 Discord-native Notification bei Helper-offline/degraded mit Sofort-Reconnect-Klick + Recovery-Kommando; Erfolgs-Bestätigung; Anti-Spam; Tests
+- [x] 8.1 Discord-native Notification bei Helper-offline/degraded mit Sofort-Reconnect-Klick + Recovery-Kommando; Erfolgs-Bestätigung; Anti-Spam; Tests
 
 ## 9. Verdrehungserkennung (Operator 02:05: schnelles Drücken invertiert)
 
-- [ ] 9.1 aqua-mic-watch meldet TRUTH alle 500ms; StatusState.noteTruth korrigiert stabile Inversionen (Grace 2500ms nach Bridge-Kommando, 1000ms Stabilität) konvergent zur Mic-Wahrheit; Zähler im Snapshot; Tests
-- [ ] 9.2 Bridge-Tap-Debounce 300ms (Salven können Parität nicht mehr kippen); Test
+- [x] 9.1 aqua-mic-watch meldet TRUTH alle 500ms; StatusState.noteTruth korrigiert stabile Inversionen (Grace 2500ms nach Bridge-Kommando, 1000ms Stabilität) konvergent zur Mic-Wahrheit; Zähler im Snapshot; Tests
+- [x] 9.2 Bridge-Tap-Debounce 300ms (Salven können Parität nicht mehr kippen); Test
+
+## 10. Auslieferung
+
+- [x] 10.1 README neu: Mermaid-Architektur + Sequenz, Latenz-Tabelle (echte Zahlen), Schutzmechanismen, Troubleshooting inkl. Discord-Update-Reinjection, ehrlicher Status (Beleg: README.md, GitHub-Render)
 
 ## Acceptance
 

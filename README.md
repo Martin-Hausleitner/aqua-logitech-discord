@@ -1,115 +1,153 @@
-# aqua-logitech-discord
+# 🎙️ aqua-logitech-discord
 
-Super-repo: **Aqua Voice + Vencord Discord mute sync + Logitech G Pro side buttons**.
+**Aqua Voice ⇄ Discord Mute-Sync in Millisekunden** — Tastatur-Hook, CoreAudio-Wahrheit, Vencord-Plugin und eine fail-closed Messpipeline in einem Repo.
 
-Deutsch / English OK. Ehrlicher Status unten.
+![Tests](https://img.shields.io/badge/tests-164%20passing-brightgreen) ![Latenz](https://img.shields.io/badge/Taste→Mute-6–43%20ms-blue) ![Spec](https://img.shields.io/badge/OpenSpec-strict%20✓-8A2BE2) ![Platform](https://img.shields.io/badge/macOS-Apple%20Silicon-lightgrey)
 
-## Architecture
+> **Das Problem:** Aqua Voice braucht **300–780 ms**, nur um das Mikrofon zu öffnen (aus Aquas eigenem `mic_timings.json`, n=4122). Wer Discord erst danach mutet, ist immer zu spät.
+> **Die Lösung:** Ein listen-only Tasten-Hook feuert das Mute-Signal **parallel** zu Aquas Mikrofon-Start — Discord ist stumm, bevor Aqua überhaupt aufnimmt.
 
-```text
-RightCmd/RightOption tap ──▶ aqua-key-hint (listen-only CGEventTap)
-Logitech G Pro X 2 (G4/G5) ─▶ G HUB curl scripts ─┐
-                                                  ▼
-packages/mouse-bridge          :8690   state machine + settle + hid-tap + key hint
-        │ set_recording (hookSeq/hookMonoNs, fires PARALLEL to Aqua mic-open)
-        ▼
-packages/mute-sync/helper      :8688   latch + CoreAudio truth + inversion detection
-        ▲                                        │ state broadcast
-Aqua Voice ──CoreAudio events + TRUTH────────────┤
-                                                 ▼
-                         Vencord plugin AquaMuteSync → Discord self-mute
-                         (manual clicks win, outage popup, sync override)
+---
+
+## 📊 Gemessen, nicht geschätzt (live 2026-09-01, echte Tastendrücke)
+
+| Strecke | Wert | Quelle |
+|---|---|---|
+| ⚡ Taste → Discord **gemutet** | **6–43 ms** | Observer-Frames, `.proof/keyhint-*` |
+| 🔓 Stopp → Discord **wiederhergestellt** | **13–60 ms** | Observer-Frames |
+| 🐌 Aquas eigener Weg (Taste → CoreAudio-Start) | **1,1–1,3 s** | CoreAudio-Echo-Korrelation |
+| 🎤 Aquas Mikrofon-Öffnung allein | cold p50 **403 ms** / p95 **780 ms** | Aquas `mic_timings.json` |
+| 💪 Härtetest: Zyklen im 100–200-ms-Takt | Kette hielt mit (16–61 ms) | `.proof/keyhint-v3-live-*` |
+
+Alle Zeiten same-clock (mach monotonic), Warmups ausgeschlossen, jede Zahl aus committeten Beweisdateien.
+
+---
+
+## 🏗️ Architektur
+
+```mermaid
+flowchart TD
+    K["⌨️ Rechte Cmd / rechte Option<br/>(Aqua-Lock-Tasten)"] -->|"listen-only CGEventTap<br/>LOCKDOWN / LOCKABORT"| KH["🪝 aqua-key-hint"]
+    M["🖱️ Logitech G Pro X 2<br/>G4 / G5"] -->|"G HUB → curl"| B
+    KH --> B["🌉 mouse-bridge :8690<br/>State-Machine · Settle · Debounce 300ms"]
+    K -.->|"gleiche Taste"| A["🎙️ Aqua Voice<br/>öffnet Mikro (300–780 ms)"]
+    B -->|"set_recording<br/>hookSeq · hookMonoNs<br/>PARALLEL zu Aqua"| H["🧠 aqua-watch Helper :8688<br/>Latch 750ms · Inversions-Erkennung"]
+    A -->|"CoreAudio Events<br/>+ TRUTH alle 500ms"| W["👂 aqua-mic-watch<br/>(Swift, event-driven)"]
+    W --> H
+    H -->|"State-Broadcast"| P["🔌 Vencord AquaMuteSync"]
+    P -->|"Self-Mute / Restore"| D["💬 Discord"]
+    O["🔭 Benchmark-Observer<br/>(passiv, read-only)"] -.->|"liest mit"| H
 ```
 
-**Live-proven 2026-09-01:** key-tap → Discord mute observed in **6–43 ms**
-(Aqua's own mic-open is 300–400 ms — the hook fires parallel to it), restore
-13–60 ms, self-healing inversion detection via periodic microphone truth.
-Benchmark pipeline: `packages/benchmark` (observer → frames-to-trials →
-manifest, fail-closed) + `scripts/shortcut-run.sh`. Spec:
-`openspec/changes/aqua-shortcut-route-latency`.
+## 🔄 Was bei einem Tastendruck passiert
 
-Optional: `packages/exporter` (Aqua history export), `packages/stream-pip` (unrelated Stream PiP plugin).
+```mermaid
+sequenceDiagram
+    participant T as ⌨️ Taste
+    participant KH as 🪝 key-hint
+    participant H as 🧠 Helper
+    participant D as 💬 Discord
+    participant A as 🎙️ Aqua
+    T->>KH: RightCmd DOWN
+    KH->>H: set_recording(true) — sofort
+    H->>D: Broadcast → Plugin mutet (6–43 ms) 🔇
+    T-->>A: dieselbe Taste startet Aqua
+    Note over A: Mikro öffnet 300–780 ms später
+    A->>H: CoreAudio START = Bestätigung ✅
+    T->>KH: RightCmd DOWN (Stopp)
+    KH->>H: set_recording(false)
+    H->>D: Broadcast → Restore (13–60 ms) 🔊
+```
 
-## Packages
+---
 
-| Path | Role | Status |
-|------|------|--------|
-| `packages/mute-sync` | Swift CoreAudio watcher + Node WS + Vencord plugin + N298 overlay | **Proven** detection (N281); Discord mute code complete; visual mute E2E historically disputed |
-| `packages/mouse-bridge` | Button state machine, settle→Enter, G HUB hooks | **Unit-tested** machine/settle; HID path reused from N281; **full mouse E2E not proven this session** |
-| `packages/exporter` | Aqua Voice data exporter | Standalone tool (imported) |
-| `packages/stream-pip` | Stream PiP Vencord plugin | Sibling; not required for mute |
+## 🛡️ Schutzmechanismen (alle einzeln getestet)
 
-Origins: see [ATTRIBUTION.md](./ATTRIBUTION.md).
+| Mechanismus | Schützt vor | Wie |
+|---|---|---|
+| 🧯 **Kombi-Abort** | Cmd+C & Co. feuern Toggles | fire-on-DOWN + sofortiger Revert bei zweiter Taste/Modifier/Langdruck |
+| 🚦 **Tap-Debounce 300 ms** | Salven kippen die Parität | schneller als Aqua togglen kann = geschluckt |
+| 🔍 **Verdrehungserkennung** | hängende Inversionen | Mikrofon-**Wahrheit** alle 500 ms; stabile Abweichung (≥1 s, außerhalb 2,5 s Grace) wird zur Realität korrigiert — nie blind per Timer |
+| 🔒 **Bridge-Latch 750 ms** | verspätete CoreAudio-Widersprüche | Kommando gewinnt kurzfristig, CoreAudio danach |
+| ✋ **Manuelle Klicks gewinnen** | „forced mute loop" | echter Klick auf den Mute-Button beendet die Automatik für diesen Zyklus |
+| 🚨 **Ausfall-Popup** | unsichtbar tote Kopplung | Discord-Notification bei Helper-offline/degraded, Klick = Sofort-Reconnect |
+| 🧪 **Fail-closed Manifest** | geschönte Benchmarks | Run bleibt ROT ohne ≥25 valide Zyklen mit CoreAudio-Beweis + Restore |
 
-## Quick start (mute sync)
+---
+
+## 🚀 Quickstart
 
 ```bash
 # 1) Helper (LaunchAgent org.n281.aqua-watch → ws://127.0.0.1:8688)
 ./scripts/install-mute-helper.sh
 
-# 2) Deploy Vencord plugin (needs local Vencord checkout)
+# 2) Bridge + Tasten-Hook (LaunchAgent org.aqua.mouse-bridge → :8690)
+./scripts/install-mouse-bridge.sh
+cd packages/mouse-bridge/src && swiftc -O -framework CoreGraphics -framework Foundation -o ../bin/aqua-key-hint aqua-key-hint.swift
+
+# 3) Vencord-Plugin deployen (braucht lokalen Vencord-Checkout) + Discord neu starten
 ./scripts/deploy-vencord-plugin.sh
 
-# 3) Discord: enable plugin "AquaMuteSync" (often already enabled)
+# 4) Benchmark-Observer (passiv, optional)
+./scripts/install-benchmark-observer.sh
 ```
 
-## Quick start (mouse bridge)
+**Gesundheitscheck:** `bash scripts/health-check.sh` · Bridge-Status: `curl -s 127.0.0.1:8690/status | jq .keyHint`
+
+## 📏 Benchmark fahren
 
 ```bash
-./scripts/install-mouse-bridge.sh
-# Then reassign G HUB G4/G5 — see packages/mouse-bridge/README.md
+bash scripts/shortcut-run.sh 300     # 5-Minuten-Fenster, dann ≥25 Tastendruck-Paare
+bash scripts/physical-run.sh 300     # Variante für die Logitech-G4-Route
 ```
 
-The canonical path emits exactly one `set_recording` frame before the HID action.
-Legacy `/shortcut/left` and `/shortcut/right` endpoints are disabled unless
-`AQUA_SHORTCUT_ENDPOINTS_ENABLED=1` is set explicitly.
+Ausgabe: `.proof/…/run-result.json` mit **einem** `all_gates_valid`-Prädikat, p50/p95/p99 und jedem aussortierten Zyklus samt stabilem Grund (`route_mismatch`, `stale`, `baseline_premuted`, `synthetic_control`, …). 5 Warmups raus, ≥20 gemessene Zyklen Pflicht, Taste→CoreAudio-Physik ausgewiesen ausgeschlossen. Details: [`docs/PHYSICAL-RUN-RUNBOOK.md`](docs/PHYSICAL-RUN-RUNBOOK.md).
 
-## Passive latency benchmark
+## ⌨️ Aqua-Tasten-Kontrakt
 
-`packages/benchmark/observe.mjs` is a local, read-only observer for
-`ws://127.0.0.1:8688`. It never sends `app_state`, `set_recording`, input,
-or process-control commands.
+| Taste | Aqua-Aktion | Hook |
+|---|---|---|
+| `Fn` | activate (PTT) | – |
+| `MetaRight` (rechte Cmd) | **lock** (Toggle) | ✅ feuert parallel |
+| `AltRight` (rechte Option) | **lock** (Toggle) | ✅ feuert parallel |
 
-```bash
-node packages/benchmark/observe.mjs "$HOME/Library/Logs/aqua-hook-benchmark.jsonl"
-node --test packages/benchmark/*.test.mjs
-```
+Quelle ist immer die **live** `~/Library/Application Support/Aqua Voice/settings.json` — nicht der Export. Rechte Ctrl ist **kein** Aqua-Key.
 
-Keep the JSONL file private. Report start and stop separately, exclude exactly
-five warmups, require at least twenty measured trials, and publish p50/p95/p99
-only when every trial has an actual Discord confirmation and restores the
-original mute state. A software endpoint run is not proof of physical
-button-to-audio latency.
+## 🩺 Troubleshooting
 
-`packages/benchmark/jsonl-cycles.mjs` performs the strict offline analysis. It
-accepts the observer's real `appStateSeq`, intent, confirmation, and Discord
-metadata, rejects malformed or regressing sequences, and only accepts a run
-after five qualified warmups plus at least twenty qualified measured cycles.
+| Symptom | Ursache | Fix |
+|---|---|---|
+| 🚨 Popup „NICHT verbunden" | Helper down | Klick aufs Popup (Sofort-Reconnect) oder `launchctl kickstart -k gui/501/org.n281.aqua-watch` |
+| Plugin nach Discord-Update komplett weg | **Discord-Updates entfernen die Vencord-Injection** (`app.asar` wird ersetzt) | `app.asar` → `_app.asar`, Loader-Ordner `app.asar/` mit `index.js` → Vencord `patcher.js`; dann Discord-Neustart |
+| ⚠️ „degraded" | CoreAudio-Watcher tot | Helper-Kickstart (Kommando oben) |
+| Zustand wirkt verdreht | Salve schneller als Aqua | 3–5 s warten — Verdrehungserkennung übernimmt die Mikrofon-Wahrheit |
+| Benchmark-JSONL fehlt | externe Log-Cleaner löschen `~/Library/Logs/aqua-*` | Fenster-Skripte kopieren Beweise sofort nach `.proof/` |
 
-## Aqua key contract
+Legacy-Endpoints `/shortcut/left|right` bleiben deaktiviert ohne `AQUA_SHORTCUT_ENDPOINTS_ENABLED=1`. Der Observer ist strikt passiv (sendet nie `set_recording`/`app_state`); JSONL privat halten.
 
-- `Fn` → activate (PTT), when configured in Aqua Voice
-- `MetaRight` / `AltRight` → lock (toggle), when configured in Aqua Voice
-- Synthetic **Fn via HID event tap works**; System Events Fn does **not**
+## 📐 Spec-driven
 
-## Honest status vs requirements
+Jede Änderung läuft über OpenSpec (`openspec validate --strict`):
+[`aqua-shortcut-route-latency`](openspec/changes/aqua-shortcut-route-latency/) (Tasten-Route, Verdrehungserkennung, Overrides) · [`aqua-physical-hook-e2e`](openspec/changes/aqua-physical-hook-e2e/) (Logitech-Route, Manifest-Pipeline) · ältere Changes unter [`openspec/changes/`](openspec/changes/).
 
-| Requirement | Status |
-|-------------|--------|
-| Discord mute sync via Vencord + CoreAudio helper | Helper + plugin code present; **E2E mute BLOCKED 2026-07-24** (`apps.discord.online=false`) — enable AquaMuteSync in Discord |
-| Button1 toggle + Enter after transcript settle | **API PASS 2026-07-24** via latched Fn (`AQUA_TOGGLE_MODE=fn-latch`); settle `reason=wav` then Enter. MetaRight/F19 lock unreliable via CGEvent |
-| Button2 PTT no Enter; Button1 tap after = Enter | **API PASS 2026-07-24** |
-| Physical G4/G5 + G HUB | G4→AquaButton1.app rebound previously; physical clicks **not observed** this session. G5: use Karabiner `button5→Fn` (see `packages/mouse-bridge/karabiner/`) |
-| E2E harness | `bash scripts/e2e-aqua-mouse.sh` → `.proof/e2e-*/` |
+## 🧩 Pakete
 
-## Manual next steps (operator)
+| Pfad | Rolle | Status |
+|---|---|---|
+| `packages/mouse-bridge` | State-Machine · Settle · hid-tap · **aqua-key-hint** | ✅ live, 6–43 ms Taste→Mute |
+| `packages/mute-sync` | Swift-CoreAudio-Watcher · Helper-WS · **Vencord-Plugin** | ✅ live, 46 Plugin-Tests (esbuild+vm gegen echte Quelle) |
+| `packages/benchmark` | Passiver Observer · frames-to-trials · fail-closed Manifest | ✅ Trockenkette beidseitig bewiesen |
+| `packages/exporter` | Aqua-History-Export | eigenständig |
+| `packages/stream-pip` | Stream-PiP-Plugin | unabhängig vom Mute |
 
-1. Run `./scripts/install-mute-helper.sh` and confirm `curl`/WS on `:8688`.
-2. Confirm Discord plugin **AquaMuteSync** enabled; restart Discord if helper was down.
-3. In **G HUB**: remove G4 `cm enter` macro; point G4→`button1.sh`, G5 press/release→`button2-*.sh`.
-4. Grant **Accessibility** to Terminal/node/`hid-tap` as prompted.
-5. Smoke-test: `curl -X POST http://127.0.0.1:8690/button1` twice with focus in a text field.
+Herkunft: [ATTRIBUTION.md](./ATTRIBUTION.md) · Verwandt: [aqua-mute-sync](https://github.com/Martin-Hausleitner/aqua-mute-sync) · [aqua-voice-exporter](https://github.com/Martin-Hausleitner/aqua-voice-exporter)
 
-## Related public repositories
+## 🧾 Ehrlicher Status
 
-- GitHub: https://github.com/Martin-Hausleitner/aqua-mute-sync · https://github.com/Martin-Hausleitner/aqua-voice-exporter
+| Behauptung | Beweislage |
+|---|---|
+| Taste→Mute 6–43 ms, Restore 13–60 ms | ✅ live gemessen, Frames in `.proof/` |
+| Salven-Härtetest (100-ms-Zyklen) | ✅ Kette hielt; Schutz (Debounce+Truth) danach deployed |
+| Manuelle Klicks gewinnen / Popup / Override | ✅ 164 Tests grün, live deployed |
+| **Formales 25-Paar-Manifest (`all_gates_valid`)** | ⏳ ausstehend — braucht normalen 2-s-Rhythmus (Aqua-Echo pro Zyklus Pflicht) |
+| GUI-Schlussbeweis (Codex Computer Use) | ⏳ ausstehend |
