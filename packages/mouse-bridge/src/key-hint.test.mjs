@@ -38,6 +38,12 @@ test("the tap fires on key-down and aborts on combos, second modifiers, and long
     assert.match(keyDownBlock, /abortPending\(\)/);
 });
 
+test("tap volleys are debounced so optimistic parity cannot outrun Aqua", () => {
+    const body = block("startKeyHint");
+    assert.match(body, /now - keyHint\.lastTapAt < 300/);
+    assert.match(body, /keyHint\.debounced\+\+/);
+});
+
 test("key-hint is env-gated, self-healing, and surfaces the TCC denial", () => {
     assert.match(bridge, /AQUA_KEY_HINT !== "0"/);
     const body = block("startKeyHint");

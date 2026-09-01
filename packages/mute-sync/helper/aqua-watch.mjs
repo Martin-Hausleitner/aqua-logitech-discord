@@ -140,6 +140,13 @@ function startEventChannel() {
             buf = buf.slice(i + 1);
             if (line === "START") setRecording(true, "coreaudio");
             else if (line === "STOP") setRecording(false, "coreaudio");
+            else if (line === "TRUTH 1" || line === "TRUTH 0") {
+                const correction = status.noteTruth(line === "TRUTH 1");
+                if (correction !== null) {
+                    log(`inversion corrected -> recording=${correction} (mic truth, #${status.inversionsCorrected})`);
+                    setRecording(correction, "coreaudio");
+                }
+            }
         }
     });
     child.on("exit", (code) => {

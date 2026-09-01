@@ -90,3 +90,36 @@ test('a CoreAudio transition also clears the pending command', () => {
   t = 999999;
   assert.equal(state.unconfirmedCommand(), null);
 });
+
+test('inversion detection adopts stable microphone truth outside the grace window', async () => {
+  const { INVERSION_GRACE_MS, INVERSION_CONFIRM_MS } = await import('./status-state.mjs');
+  let t = 1000;
+  const state = new StatusState({ now: () => t, monoNow: () => '1' });
+  // fast volley leaves helper true while Aqua actually stopped
+  state.setRecording(true, 'bridge', { hookSeq: 1, hookMonoNs: '10' });
+  // inside grace: truth disagreement must NOT arm
+  t = 1000 + INVERSION_GRACE_MS - 100;
+  assert.equal(state.noteTruth(false), null);
+  // outside grace: first disagreeing truth arms, second (stable) corrects
+  t = 1000 + INVERSION_GRACE_MS + 100;
+  assert.equal(state.noteTruth(false), null);
+  t += INVERSION_CONFIRM_MS + 1;
+  assert.equal(state.noteTruth(false), false);
+  assert.equal(state.snapshot().inversionsCorrected, 1);
+  // caller applies it as a normal coreaudio transition
+  assert.equal(state.setRecording(false, 'coreaudio'), true);
+  assert.equal(state.recording, false);
+  assert.equal(state.noteTruth(false), null, 'agreement never fires');
+});
+
+test('an agreeing truth report disarms a pending disagreement', async () => {
+  const { INVERSION_GRACE_MS, INVERSION_CONFIRM_MS } = await import('./status-state.mjs');
+  let t = 1000;
+  const state = new StatusState({ now: () => t, monoNow: () => '1' });
+  state.setRecording(true, 'bridge', { hookSeq: 1, hookMonoNs: '10' });
+  t = 1000 + INVERSION_GRACE_MS + 100;
+  assert.equal(state.noteTruth(false), null); // armed
+  assert.equal(state.noteTruth(true), null);  // agreement resets
+  t += INVERSION_CONFIRM_MS + 1;
+  assert.equal(state.noteTruth(false), null, 'must re-arm from scratch');
+});

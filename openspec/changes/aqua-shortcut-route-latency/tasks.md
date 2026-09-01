@@ -35,6 +35,11 @@
 
 - [ ] 8.1 Discord-native Notification bei Helper-offline/degraded mit Sofort-Reconnect-Klick + Recovery-Kommando; Erfolgs-Bestätigung; Anti-Spam; Tests
 
+## 9. Verdrehungserkennung (Operator 02:05: schnelles Drücken invertiert)
+
+- [ ] 9.1 aqua-mic-watch meldet TRUTH alle 500ms; StatusState.noteTruth korrigiert stabile Inversionen (Grace 2500ms nach Bridge-Kommando, 1000ms Stabilität) konvergent zur Mic-Wahrheit; Zähler im Snapshot; Tests
+- [ ] 9.2 Bridge-Tap-Debounce 300ms (Salven können Parität nicht mehr kippen); Test
+
 ## Acceptance
 
 - Coreaudio-sourced recording mutes/restores in the executable test suite AND

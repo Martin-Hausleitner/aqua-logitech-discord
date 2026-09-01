@@ -17,6 +17,7 @@ test("initial snapshot reports Discord as offline and unknown", () => {
         confirmation: null,
         controlRelays: 0,
         unconfirmedCommands: 0,
+        inversionsCorrected: 0,
         apps: {
             discord: { muted: null, online: false, seq: 0, ts: 0 }
         }

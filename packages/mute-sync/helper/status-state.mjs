@@ -8,6 +8,11 @@ export const BRIDGE_LATCH_MS = 750;
  *  Diktate um (seq 53/59). Heilung: Kombi-Abort an der Quelle + CoreAudio-
  *  Korrektur nach dem Latch + der Nutzer-Tap selbst. */
 export const CONFIRM_DEADLINE_MS = 2500;
+/** Inversion detection: adopt the microphone truth when it disagrees with the
+ *  held state for INVERSION_CONFIRM_MS, but never within INVERSION_GRACE_MS
+ *  of the last bridge command (Aqua may still be catching up). */
+export const INVERSION_GRACE_MS = 2500;
+export const INVERSION_CONFIRM_MS = 1000;
 
 const DEFAULT_APPS = ["discord"];
 const COMMAND_SOURCES = new Set(["bridge", "control"]);
@@ -27,6 +32,8 @@ export class StatusState {
         this.controlRelays = 0;
         this.pendingCommand = null;
         this.unconfirmedCommands = 0;
+        this.truthDisagreeSince = null;
+        this.inversionsCorrected = 0;
         this.apps = new Map(apps.map(app => [app, {
             muted: null,
             online: false,
@@ -50,6 +57,7 @@ export class StatusState {
             confirmation: this.confirmation,
             controlRelays: this.controlRelays,
             unconfirmedCommands: this.unconfirmedCommands,
+            inversionsCorrected: this.inversionsCorrected,
             apps: Object.fromEntries(
                 [...this.apps].map(([app, state]) => [app, { ...state }])
             )
@@ -116,6 +124,33 @@ export class StatusState {
         this.unconfirmedCommands++;
         this.seq++;
         return pending;
+    }
+
+    /** Periodic microphone truth from the CoreAudio watcher. Returns the
+     *  boolean to adopt when a STABLE inversion is detected, else null. The
+     *  caller applies it as a normal coreaudio transition — this converges to
+     *  reality instead of blindly reverting (see CONFIRM_DEADLINE_MS note). */
+    noteTruth(truth) {
+        if (typeof truth !== "boolean") return null;
+        const nowTs = this.now();
+        if (truth === this.recording) {
+            this.truthDisagreeSince = null;
+            return null;
+        }
+        if (nowTs - this.lastBridgeAt < INVERSION_GRACE_MS) {
+            this.truthDisagreeSince = null;
+            return null;
+        }
+        if (this.truthDisagreeSince === null) {
+            this.truthDisagreeSince = nowTs;
+            return null;
+        }
+        if (nowTs - this.truthDisagreeSince >= INVERSION_CONFIRM_MS) {
+            this.truthDisagreeSince = null;
+            this.inversionsCorrected++;
+            return truth;
+        }
+        return null;
     }
 
     /** A competing control route (set_mute/toggle_mute/aqua_toggle relay) fired. */

@@ -156,3 +156,36 @@ outage phase).
 
 - **WHEN** the socket reconnects after an outage notification
 - **THEN** a short success notification confirms sync is active again
+
+### Requirement: Inversion detection converges to microphone truth
+
+The CoreAudio watcher SHALL report the actual capture state periodically (not
+only transitions), and the helper SHALL correct a stable disagreement between
+its recording state and that microphone truth by adopting the truth — after a
+grace period following the last bridge command and only when the disagreement
+persists across consecutive truth reports. Corrections MUST be counted in the
+snapshot. Timer-based blind reverts remain forbidden.
+
+#### Scenario: Fast tap volley flips parity
+
+- **WHEN** rapid taps outrun Aqua and leave the helper inverted with no new
+  CoreAudio transition
+- **THEN** the periodic truth report corrects the state within a bounded time
+  and the plugin follows
+
+#### Scenario: Aqua still catching up
+
+- **WHEN** the disagreement is younger than the grace period after a bridge
+  command
+- **THEN** no correction fires
+
+### Requirement: Tap debounce protects parity
+
+The bridge SHALL ignore lock-tap flips arriving faster than Aqua can process
+a toggle (minimum spacing), so optimistic state and Aqua cannot diverge by
+outrunning.
+
+#### Scenario: Two taps within the debounce window
+
+- **WHEN** a second LOCKDOWN arrives within the minimum spacing
+- **THEN** no flip fires for it and the event is logged

@@ -49,7 +49,7 @@ let watchWs = null;
  *  Aqua reacts to the same physical key itself; we never send it a keystroke. */
 const KEY_HINT_ENABLED = process.env.AQUA_KEY_HINT !== "0";
 const KEY_HINT_BIN = join(ROOT, "bin", "aqua-key-hint");
-const keyHint = { running: false, taps: 0, aborts: 0, lastTapAt: 0, denied: false, pendingFlip: null };
+const keyHint = { running: false, taps: 0, aborts: 0, debounced: 0, lastTapAt: 0, denied: false, pendingFlip: null };
 
 function startKeyHint() {
   if (!KEY_HINT_ENABLED) return;
@@ -76,13 +76,20 @@ function startKeyHint() {
         keyHint.denied = false;
         log("key-hint ready (right-cmd/right-ctrl lock taps, fire-on-down)");
       } else if (line.startsWith("LOCKDOWN")) {
-        // Optimistic flip at key-DOWN: minimum latency. A combo/long-hold
-        // aborts below; the helper's unconfirmed-rollback is the final net.
-        keyHint.taps++;
-        keyHint.lastTapAt = Date.now();
-        keyHint.pendingFlip = !aquaRecording;
-        notifySameButton(keyHint.pendingFlip);
-        log("key-hint", line, `-> set_recording=${keyHint.pendingFlip}`);
+        // Optimistic flip at key-DOWN: minimum latency. Combos abort below;
+        // the helper's truth report corrects stable inversions.
+        const now = Date.now();
+        if (now - keyHint.lastTapAt < 300) {
+          // Faster than Aqua can toggle — flipping would desync parity.
+          keyHint.debounced++;
+          log("key-hint", line, "debounced (<300ms)");
+        } else {
+          keyHint.taps++;
+          keyHint.lastTapAt = now;
+          keyHint.pendingFlip = !aquaRecording;
+          notifySameButton(keyHint.pendingFlip);
+          log("key-hint", line, `-> set_recording=${keyHint.pendingFlip}`);
+        }
       } else if (line.startsWith("LOCKTAP")) {
         keyHint.pendingFlip = null; // clean tap — the down-flip stands
       } else if (line.startsWith("LOCKABORT")) {

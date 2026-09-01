@@ -95,6 +95,17 @@ func refresh() {
     recompute()
 }
 
+// Verdrehungserkennung: periodische Ist-Wahrheit (nicht nur Übergänge) —
+// der Helper korrigiert damit stabile Inversionen nach Tap-Salven.
+let truthTimer = DispatchSource.makeTimerSource(queue: queue)
+truthTimer.schedule(deadline: .now() + 0.5, repeating: 0.5)
+truthTimer.setEventHandler {
+    let state = watched.contains { isRunningInput($0) }
+    print("TRUTH \(state ? 1 : 0)")
+    fflush(stdout)
+}
+truthTimer.resume()
+
 var listAddr = address(kAudioHardwarePropertyProcessObjectList)
 AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &listAddr, queue) { _, _ in refresh() }
 
