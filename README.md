@@ -7,17 +7,26 @@ Deutsch / English OK. Ehrlicher Status unten.
 ## Architecture
 
 ```text
-Logitech G Pro X 2 (side G4/G5)
-        │  G HUB → curl scripts (not raw Enter macros)
+RightCmd/RightOption tap ──▶ aqua-key-hint (listen-only CGEventTap)
+Logitech G Pro X 2 (G4/G5) ─▶ G HUB curl scripts ─┐
+                                                  ▼
+packages/mouse-bridge          :8690   state machine + settle + hid-tap + key hint
+        │ set_recording (hookSeq/hookMonoNs, fires PARALLEL to Aqua mic-open)
         ▼
-packages/mouse-bridge          :8690   state machine + settle + hid-tap
-        │ MetaRight / Fn / Enter (CGEvent HID)
-        ▼
-Aqua Voice  ──CoreAudio──▶  packages/mute-sync/helper  :8688
-                                   │
-                                   ▼
+packages/mute-sync/helper      :8688   latch + CoreAudio truth + inversion detection
+        ▲                                        │ state broadcast
+Aqua Voice ──CoreAudio events + TRUTH────────────┤
+                                                 ▼
                          Vencord plugin AquaMuteSync → Discord self-mute
+                         (manual clicks win, outage popup, sync override)
 ```
+
+**Live-proven 2026-09-01:** key-tap → Discord mute observed in **6–43 ms**
+(Aqua's own mic-open is 300–400 ms — the hook fires parallel to it), restore
+13–60 ms, self-healing inversion detection via periodic microphone truth.
+Benchmark pipeline: `packages/benchmark` (observer → frames-to-trials →
+manifest, fail-closed) + `scripts/shortcut-run.sh`. Spec:
+`openspec/changes/aqua-shortcut-route-latency`.
 
 Optional: `packages/exporter` (Aqua history export), `packages/stream-pip` (unrelated Stream PiP plugin).
 
