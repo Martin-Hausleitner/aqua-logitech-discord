@@ -44,6 +44,11 @@
 
 - [x] 10.1 README neu: Mermaid-Architektur + Sequenz, Latenz-Tabelle (echte Zahlen), Schutzmechanismen, Troubleshooting inkl. Discord-Update-Reinjection, ehrlicher Status (Beleg: README.md, GitHub-Render)
 
+## 11. Tropfen-Button Feinschliff (Operator 22:47: Segment-Optik + Rechtsklick-Resync)
+
+- [x] 11.1 Override-Button bündig im Mute-Segment: border-radius 0, margin 0, transparenter Hintergrund (keine eigene Pille); Test (Beleg: injectSyncOverrideButton setProperty×3 important; Test "segment continuity")
+- [x] 11.2 Rechtsklick auf den Tropfen = Force-Resync: WS still ersetzen (kein Fehl-Popup), Caches + Manual-Exception zurück, sofort reconnecten; Tests (Beleg: forceResync(); Test "drop-button right-click"; live deployed, Plugin nach Reload online)
+
 ## Acceptance
 
 - Coreaudio-sourced recording mutes/restores in the executable test suite AND

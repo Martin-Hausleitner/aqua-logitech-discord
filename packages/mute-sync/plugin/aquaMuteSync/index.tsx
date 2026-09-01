@@ -754,6 +754,30 @@ function scheduleReconnect() {
     }, 3000);
 }
 
+/** Rechtsklick auf den Tropfen: harter Neu-Sync. Alte Verbindung STILL
+ *  verwerfen (Handler ablösen, sonst feuert onclose das Outage-Popup für
+ *  einen gewollten Reload), Caches und die Manual-Exception zurücksetzen —
+ *  der nächste state-Broadcast des Helpers stellt den Soll-Zustand her. */
+function forceResync(reason: string) {
+    console.info(`[AquaMuteSync] force-resync (${reason})`);
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    const old = ws;
+    ws = null;
+    if (old) {
+        try { old.onopen = null; old.onmessage = null; old.onclose = null; old.onerror = null; } catch {}
+        try { old.close(); } catch {}
+    }
+    helperConnected = false;
+    lastReportedMute = null;
+    lastSeq = -1;
+    lastGetStateAt = 0; // nächster driftCheck fragt sofort get_state
+    manualClickMonoMs = null; // Automatik wieder scharf
+    cachedMuteButton = null; // DOM-Cache neu aufbauen
+    driftToastShown = false;
+    connect();
+    infoToast("🔄 AquaMuteSync neu synchronisiert");
+}
+
 function toggleSync() {
     syncEnabled = !syncEnabled;
     settings.store.autoSync = syncEnabled;
@@ -867,9 +891,19 @@ function injectSyncOverrideButton() {
         button.id = OVERRIDE_BUTTON_ID;
         button.type = "button";
         button.className = muteButton.className;
+        // Sitzt MITTEN im Mute-Segment (zwischen Button und Chevron): keine
+        // eigene Pille — bündig durchlaufen (Operator 22:47).
+        button.style.setProperty("border-radius", "0", "important");
+        button.style.setProperty("margin", "0", "important");
+        button.style.setProperty("background", "transparent", "important");
         button.dataset.vcAquaOverride = "true";
         button.setAttribute("role", "switch");
         button.addEventListener("click", event => { event.stopPropagation(); toggleSync(); });
+        button.addEventListener("contextmenu", event => {
+            event.preventDefault();
+            event.stopPropagation();
+            forceResync("tropfen-rechtsklick");
+        });
         renderSyncOverrideState(button);
         muteButton.insertAdjacentElement("afterend", button);
         overrideButton = button;

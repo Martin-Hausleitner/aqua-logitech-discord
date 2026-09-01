@@ -189,3 +189,30 @@ outrunning.
 
 - **WHEN** a second LOCKDOWN arrives within the minimum spacing
 - **THEN** no flip fires for it and the event is logged
+
+### Requirement: Drop-button right-click forces a resync
+
+The override drop button SHALL treat a right-click (contextmenu) as a hard
+resync command: the plugin drops the current helper connection without
+raising an outage notification, clears observation caches and the manual
+exception, reconnects immediately, and follows the next helper state
+broadcast for Discord's mute state.
+
+#### Scenario: Right-click on the drop button
+
+- **WHEN** the user right-clicks the injected override button
+- **THEN** the plugin suppresses the context menu, silently replaces the
+  socket (old handlers detached before close), resets caches and the manual
+  exception, and reconnects at once
+
+### Requirement: Injected button renders flush in the mute segment
+
+The injected override button SHALL render flush inside Discord's mute
+segment: no own corner rounding, no margin, and a transparent background so
+the segment reads as one continuous control.
+
+#### Scenario: Visual continuity beside the native control
+
+- **WHEN** the override button is injected beside the native mute control
+- **THEN** it carries border-radius 0, margin 0, and a transparent
+  background with important priority

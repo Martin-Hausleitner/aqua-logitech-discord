@@ -24,7 +24,7 @@ async function loadActual({ buttons = [], store = null } = {}) {
     );
     const beforePlugin = withoutSettings.slice(0, withoutSettings.indexOf("export default definePlugin({"));
     const testSurface = `${beforePlugin}
-globalThis.__aqua = { getDomMuteButton, getDomMuteState, getObservedSelfMute, getControlSelfMute, isSelfMute, reportDiscordMute, beginRecordingMute, restorePreMute, setSelfMute, driftCheck, toggleSync, reconcile, publishAutoSync, injectSyncOverrideButton, renderSyncOverrideState, onMuteButtonPointerDown, getManualClick: () => manualClickMonoMs, getOverrideButton: () => overrideButton, getSyncEnabled: () => syncEnabled, setWs: value => ws = value, getSettings: () => settings.store, getRuntime: () => ({ aquaRecording, helperConnected, helperDegraded, latestStateSeq, latestHookSeq, latestStateIntent, latestStateConfirmation, latestBridgeTuple }), setRuntime: value => { if (typeof value.aquaRecording === "boolean") aquaRecording = value.aquaRecording; if (typeof value.helperConnected === "boolean") helperConnected = value.helperConnected; }, getTestApi: () => ({ operationalRestore: typeof operationalRestore === "function" ? operationalRestore : null, handleHelperState: typeof handleHelperState === "function" ? handleHelperState : null, handleIncomingMessage: typeof handleIncomingMessage === "function" ? handleIncomingMessage : null, qualifyTransition: typeof qualifyTransition === "function" ? qualifyTransition : null, measureTransition: typeof measureTransition === "function" ? measureTransition : null }) };
+globalThis.__aqua = { getDomMuteButton, getDomMuteState, getObservedSelfMute, getControlSelfMute, isSelfMute, reportDiscordMute, beginRecordingMute, restorePreMute, setSelfMute, driftCheck, toggleSync, reconcile, publishAutoSync, injectSyncOverrideButton, renderSyncOverrideState, onMuteButtonPointerDown, forceResync, setStopped: value => stopped = value, getManualClick: () => manualClickMonoMs, getOverrideButton: () => overrideButton, getSyncEnabled: () => syncEnabled, setWs: value => ws = value, getSettings: () => settings.store, getRuntime: () => ({ aquaRecording, helperConnected, helperDegraded, latestStateSeq, latestHookSeq, latestStateIntent, latestStateConfirmation, latestBridgeTuple }), setRuntime: value => { if (typeof value.aquaRecording === "boolean") aquaRecording = value.aquaRecording; if (typeof value.helperConnected === "boolean") helperConnected = value.helperConnected; }, getTestApi: () => ({ operationalRestore: typeof operationalRestore === "function" ? operationalRestore : null, handleHelperState: typeof handleHelperState === "function" ? handleHelperState : null, handleIncomingMessage: typeof handleIncomingMessage === "function" ? handleIncomingMessage : null, qualifyTransition: typeof qualifyTransition === "function" ? qualifyTransition : null, measureTransition: typeof measureTransition === "function" ? measureTransition : null }) };
 `;
     const compiled = await transform(testSurface, { loader: "tsx", format: "iife", target: "es2020" });
     const sent = [];
@@ -481,10 +481,12 @@ function overrideHost() {
 
 function domElementFactory() {
     return tag => {
+        const styleProps = {};
         const el = {
             tagName: tag.toUpperCase(), attrs: {}, dataset: {}, handlers: {},
             isConnected: true, innerHTML: "", title: "", id: "", type: "", className: "",
             previousElementSibling: null, removed: false,
+            style: { props: styleProps, setProperty(name, value, priority) { styleProps[name] = { value, priority }; } },
             setAttribute(name, value) { el.attrs[name] = String(value); },
             getAttribute(name) { return el.attrs[name] ?? null; },
             addEventListener(type, fn) { el.handlers[type] = fn; },
@@ -550,6 +552,52 @@ test("drift loop reconciles the override control before the sync gate and lifecy
     const stopBody = source.slice(source.indexOf("stop() {"));
     assert.match(stopBody, /listeners\.delete\(syncOverrideListener\)/);
     assert.match(stopBody, /overrideButton\?\.remove\(\)/);
+});
+
+test("executes segment continuity: the injected button carries no own pill (radius 0, margin 0, transparent, important)", async () => {
+    const { muteBtn, inserted } = overrideHost();
+    const { aqua, context } = await loadActual({ buttons: [muteBtn] });
+    context.document.createElement = domElementFactory();
+    aqua.injectSyncOverrideButton();
+    const { el } = inserted[0];
+    assert.deepEqual(el.style.props["border-radius"], { value: "0", priority: "important" });
+    assert.deepEqual(el.style.props.margin, { value: "0", priority: "important" });
+    assert.deepEqual(el.style.props.background, { value: "transparent", priority: "important" });
+    assert.equal(typeof el.handlers.contextmenu, "function");
+});
+
+test("executes the drop-button right-click: silent socket replacement, cache+manual reset, immediate reconnect, no outage popup", async () => {
+    const { muteBtn, inserted } = overrideHost();
+    const { aqua, logs, context } = await loadActual({ buttons: [muteBtn] });
+    context.document.createElement = domElementFactory();
+    aqua.setStopped(false);
+    aqua.injectSyncOverrideButton();
+    const { el } = inserted[0];
+    aqua.onMuteButtonPointerDown(manualClickEvent());
+    assert.notEqual(aqua.getManualClick(), null);
+    const closed = [];
+    let outagePopups = 0;
+    const oldWs = {
+        readyState: 1,
+        send: () => {},
+        onclose: () => outagePopups++,
+        close() { closed.push(true); this.onclose?.(); }
+    };
+    aqua.setWs(oldWs);
+    const createdUrls = [];
+    class FakeWs { static OPEN = 1; constructor(url) { createdUrls.push(url); } }
+    context.WebSocket = FakeWs;
+    let prevented = 0;
+    let stops = 0;
+    el.handlers.contextmenu({ preventDefault: () => prevented++, stopPropagation: () => stops++ });
+    assert.equal(prevented, 1);
+    assert.equal(stops, 1);
+    assert.equal(closed.length, 1);
+    assert.equal(outagePopups, 0); // handlers were detached before close — an intended reload never raises the outage path
+    assert.equal(aqua.getManualClick(), null);
+    assert.equal(createdUrls.length, 1);
+    assert.match(createdUrls[0], /^ws:\/\/127\.0\.0\.1:/);
+    assert.equal(logs.some(([, line]) => line.includes("force-resync")), true);
 });
 
 function manualClickEvent(label = "Unmute") {
