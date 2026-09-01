@@ -118,7 +118,10 @@ export function framesToTrials(frames, { freshLimitMs = FRESH_LIMIT_MS, route = 
     let stopConf = null;
     if (route === 'bridge') {
       startConf = findConfirmation(frames, startIndex, stopIndex + 1, start.intent?.hookSeq, true);
-      stopConf = findConfirmation(frames, stopIndex, windowEnd, stop.intent?.hookSeq, false);
+      // Aqua keeps the mic open 2-4s after stop (transcription tail): the
+      // stop echo may land after the next cycle already started. hookSeq
+      // correlation stays unambiguous, so search to the end of the capture.
+      stopConf = findConfirmation(frames, stopIndex, frames.length, stop.intent?.hookSeq, false);
       if (!startConf || !stopConf) reasons.add('confirmation_mismatch');
     }
 
