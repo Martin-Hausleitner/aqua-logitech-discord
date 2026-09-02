@@ -49,6 +49,12 @@
 - [x] 11.1 Override-Button bündig im Mute-Segment: border-radius 0, margin 0, transparenter Hintergrund (keine eigene Pille); Test (Beleg: injectSyncOverrideButton setProperty×3 important; Test "segment continuity")
 - [x] 11.2 Rechtsklick auf den Tropfen = Force-Resync: WS still ersetzen (kein Fehl-Popup), Caches + Manual-Exception zurück, sofort reconnecten; Tests (Beleg: forceResync(); Test "drop-button right-click"; live deployed, Plugin nach Reload online)
 
+## 12. Tropfen-Rechtsklick: RTC-Audio-Reset mit Menü (Operator HIGH 2026-09-02: packets skipped klettert)
+
+- [x] 12.1 Rechtsklick öffnet Menü (ContextMenuApi): "Audio-Verbindung resetten (+ Aqua-Sync)" default + "Nur Aqua neu syncen"; Menü-Ausfall = Fallback direkt auf Default-Aktion; Tests (Beleg: openResetMenu(); 3 Tests)
+- [x] 12.2 resetAudioConnection: Stufe 1 chirurgische MediaEngine-Connection-Methode (introspektiert + geloggt), Stufe 2 offline/online-Fast-Reconnect — im Call bleiben, nie Discord.app beenden; Popup nennt den Weg; Tests (Beleg: Tests netEvents offline→online; LIVE-Wirkung auf packets-skipped = Operator-Rechtsklick ausstehend)
+- [x] 12.3 Vencord dist rebuild + Plugin-Reload ohne Discord-Quit; Plugin wieder online am Helper (Beleg: renderer.js enthält vc-aqua-reset-menu; Cmd+R; WS discord online:true seq 880)
+
 ## Acceptance
 
 - Coreaudio-sourced recording mutes/restores in the executable test suite AND

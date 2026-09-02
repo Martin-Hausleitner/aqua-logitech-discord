@@ -8,7 +8,7 @@ import { ChatBarButton } from "@api/ChatButtons";
 import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
 import definePlugin, { OptionType } from "@utils/types";
-import { React, showToast, Toasts } from "@webpack/common";
+import { ContextMenuApi, Menu, React, showToast, Toasts } from "@webpack/common";
 
 const settings = definePluginSettings({
     // WICHTIG: nicht "enabled" nennen — dieser Key ist Vencords Plugin-Enable-Flag
@@ -778,6 +778,74 @@ function forceResync(reason: string) {
     infoToast("🔄 AquaMuteSync neu synchronisiert");
 }
 
+const VOICE_RESET_METHOD_HINTS = ["reconnect", "recreateConnection", "restartIce", "recreate"];
+
+/** Discord-RTC-Transport neu aufbauen, OHNE den Call zu verlassen und ohne
+ *  Discord.app zu beenden (Operator-Befund: outbound packets sent steht,
+ *  packets skipped klettert = Send-Skip im MediaEngine-Transport, nicht Aqua).
+ *  Stufe 1: chirurgische Connection-Methode, falls die Engine eine anbietet —
+ *  die verfügbaren Methodennamen werden geloggt (Forensik für die echte API).
+ *  Stufe 2: offline/online-Fenster-Events → Discords eigener Fast-Resume baut
+ *  Gateway + Voice-UDP neu auf; der Nutzer bleibt im Channel. */
+function resetAudioConnection(): string {
+    try {
+        const engine = getMediaEngineStore()?.getMediaEngine?.();
+        const conns: any[] = engine?.connections ? Array.from(engine.connections) : [];
+        for (const conn of conns) {
+            const names = new Set<string>();
+            for (let o = conn; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+                for (const k of Object.getOwnPropertyNames(o)) {
+                    if (typeof conn[k] === "function") names.add(k);
+                }
+            }
+            console.info(`[AquaMuteSync] rtc-conn methods: ${Array.from(names).sort().join(",")}`);
+            const hit = VOICE_RESET_METHOD_HINTS.find(h => names.has(h));
+            if (hit) {
+                conn[hit]();
+                return `MediaEngine.${hit}()`;
+            }
+        }
+    } catch (err) {
+        console.warn(`[AquaMuteSync] rtc surgical reset unavailable: ${err}`);
+    }
+    try {
+        window.dispatchEvent(new Event("offline"));
+        setTimeout(() => { try { window.dispatchEvent(new Event("online")); } catch {} }, 250);
+        return "Netz-Event-Fast-Reconnect";
+    } catch (err) {
+        console.warn(`[AquaMuteSync] rtc reset failed: ${err}`);
+        return "fehlgeschlagen";
+    }
+}
+
+/** Default-Aktion des Tropfen-Rechtsklicks: RTC-Reset + Aqua-Resync + Popup. */
+function resetAudioAndResync() {
+    const how = resetAudioConnection();
+    forceResync("audio-reset");
+    try {
+        showNotification({
+            title: "AquaMuteSync 🔌 Audio-Verbindung reset",
+            body: `RTC-Neuaufbau via ${how} — im Call geblieben. Aqua neu gesynct.`
+        });
+    } catch {}
+}
+
+/** Rechtsklick-Menü am Tropfen. Fällt das Menü-API aus, läuft die
+ *  Default-Aktion direkt (Spec: Menu cannot be shown). */
+function openResetMenu(event: Event) {
+    try {
+        ContextMenuApi.openContextMenu(event as any, () => (
+            <Menu.Menu navId="vc-aqua-reset-menu" onClose={ContextMenuApi.closeContextMenu} aria-label="Aqua-Reset-Menü">
+                <Menu.MenuItem id="vc-aqua-reset-audio" label="🔌 Audio-Verbindung resetten (+ Aqua-Sync)" action={resetAudioAndResync} />
+                <Menu.MenuItem id="vc-aqua-resync" label="🔄 Nur Aqua neu syncen" action={() => forceResync("tropfen-menue")} />
+            </Menu.Menu>
+        ));
+    } catch (err) {
+        console.warn(`[AquaMuteSync] context menu failed (${err}) — running default reset`);
+        resetAudioAndResync();
+    }
+}
+
 function toggleSync() {
     syncEnabled = !syncEnabled;
     settings.store.autoSync = syncEnabled;
@@ -902,7 +970,7 @@ function injectSyncOverrideButton() {
         button.addEventListener("contextmenu", event => {
             event.preventDefault();
             event.stopPropagation();
-            forceResync("tropfen-rechtsklick");
+            openResetMenu(event);
         });
         renderSyncOverrideState(button);
         muteButton.insertAdjacentElement("afterend", button);

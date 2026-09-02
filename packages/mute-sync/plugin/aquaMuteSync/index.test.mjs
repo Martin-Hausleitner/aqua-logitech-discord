@@ -24,7 +24,7 @@ async function loadActual({ buttons = [], store = null } = {}) {
     );
     const beforePlugin = withoutSettings.slice(0, withoutSettings.indexOf("export default definePlugin({"));
     const testSurface = `${beforePlugin}
-globalThis.__aqua = { getDomMuteButton, getDomMuteState, getObservedSelfMute, getControlSelfMute, isSelfMute, reportDiscordMute, beginRecordingMute, restorePreMute, setSelfMute, driftCheck, toggleSync, reconcile, publishAutoSync, injectSyncOverrideButton, renderSyncOverrideState, onMuteButtonPointerDown, forceResync, setStopped: value => stopped = value, getManualClick: () => manualClickMonoMs, getOverrideButton: () => overrideButton, getSyncEnabled: () => syncEnabled, setWs: value => ws = value, getSettings: () => settings.store, getRuntime: () => ({ aquaRecording, helperConnected, helperDegraded, latestStateSeq, latestHookSeq, latestStateIntent, latestStateConfirmation, latestBridgeTuple }), setRuntime: value => { if (typeof value.aquaRecording === "boolean") aquaRecording = value.aquaRecording; if (typeof value.helperConnected === "boolean") helperConnected = value.helperConnected; }, getTestApi: () => ({ operationalRestore: typeof operationalRestore === "function" ? operationalRestore : null, handleHelperState: typeof handleHelperState === "function" ? handleHelperState : null, handleIncomingMessage: typeof handleIncomingMessage === "function" ? handleIncomingMessage : null, qualifyTransition: typeof qualifyTransition === "function" ? qualifyTransition : null, measureTransition: typeof measureTransition === "function" ? measureTransition : null }) };
+globalThis.__aqua = { getDomMuteButton, getDomMuteState, getObservedSelfMute, getControlSelfMute, isSelfMute, reportDiscordMute, beginRecordingMute, restorePreMute, setSelfMute, driftCheck, toggleSync, reconcile, publishAutoSync, injectSyncOverrideButton, renderSyncOverrideState, onMuteButtonPointerDown, forceResync, resetAudioConnection, resetAudioAndResync, openResetMenu, setStopped: value => stopped = value, getManualClick: () => manualClickMonoMs, getOverrideButton: () => overrideButton, getSyncEnabled: () => syncEnabled, setWs: value => ws = value, getSettings: () => settings.store, getRuntime: () => ({ aquaRecording, helperConnected, helperDegraded, latestStateSeq, latestHookSeq, latestStateIntent, latestStateConfirmation, latestBridgeTuple }), setRuntime: value => { if (typeof value.aquaRecording === "boolean") aquaRecording = value.aquaRecording; if (typeof value.helperConnected === "boolean") helperConnected = value.helperConnected; }, getTestApi: () => ({ operationalRestore: typeof operationalRestore === "function" ? operationalRestore : null, handleHelperState: typeof handleHelperState === "function" ? handleHelperState : null, handleIncomingMessage: typeof handleIncomingMessage === "function" ? handleIncomingMessage : null, qualifyTransition: typeof qualifyTransition === "function" ? qualifyTransition : null, measureTransition: typeof measureTransition === "function" ? measureTransition : null }) };
 `;
     const compiled = await transform(testSurface, { loader: "tsx", format: "iife", target: "es2020" });
     const sent = [];
@@ -566,7 +566,37 @@ test("executes segment continuity: the injected button carries no own pill (radi
     assert.equal(typeof el.handlers.contextmenu, "function");
 });
 
-test("executes the drop-button right-click: silent socket replacement, cache+manual reset, immediate reconnect, no outage popup", async () => {
+test("right-click opens the reset menu with audio-reset default and aqua-resync secondary (source contract)", () => {
+    const inject = functionBody("injectSyncOverrideButton");
+    assert.match(inject, /openResetMenu\(event\)/);
+    const menu = functionBody("openResetMenu");
+    assert.match(menu, /vc-aqua-reset-audio/);
+    assert.match(menu, /resetAudioAndResync/);
+    assert.match(menu, /vc-aqua-resync/);
+    assert.match(menu, /forceResync\("tropfen-menue"\)/);
+    assert.match(menu, /running default reset/);
+});
+
+test("executes the audio reset: network fast-reconnect events fire, the aqua resync follows, popup path stays caught", async () => {
+    const { muteBtn } = overrideHost();
+    const { aqua, logs, context, runTimers } = await loadActual({ buttons: [muteBtn] });
+    aqua.setStopped(false);
+    const netEvents = [];
+    context.window.dispatchEvent = e => netEvents.push(e.type);
+    context.Event = class { constructor(type) { this.type = type; } };
+    const createdUrls = [];
+    class FakeWs { static OPEN = 1; constructor(url) { createdUrls.push(url); } }
+    context.WebSocket = FakeWs;
+    aqua.setWs({ readyState: 1, send: () => {}, close() {} });
+    aqua.resetAudioAndResync();
+    assert.deepEqual(netEvents, ["offline"]);
+    runTimers();
+    assert.deepEqual(netEvents, ["offline", "online"]);
+    assert.equal(createdUrls.length, 1);
+    assert.equal(logs.some(([, line]) => line.includes("force-resync (audio-reset)")), true);
+});
+
+test("executes the drop-button right-click fallback (menu API absent): default reset runs — silent socket replacement, cache+manual reset, no outage popup", async () => {
     const { muteBtn, inserted } = overrideHost();
     const { aqua, logs, context } = await loadActual({ buttons: [muteBtn] });
     context.document.createElement = domElementFactory();

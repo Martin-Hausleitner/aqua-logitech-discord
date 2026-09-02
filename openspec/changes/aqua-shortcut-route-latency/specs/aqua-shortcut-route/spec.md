@@ -216,3 +216,24 @@ the segment reads as one continuous control.
 - **WHEN** the override button is injected beside the native mute control
 - **THEN** it carries border-radius 0, margin 0, and a transparent
   background with important priority
+
+### Requirement: Drop-button right-click offers an RTC audio reset
+
+The drop-button right-click SHALL open a small menu (popup) whose default
+action resets Discord's live audio transport (MediaEngine RTC/UDP reconnect)
+while staying in the call and never quitting Discord.app, followed by an
+Aqua helper resync; a secondary action performs the Aqua resync alone. The
+user SHALL receive popup feedback naming what was reset.
+
+#### Scenario: Send-skip stall on the voice transport
+
+- **WHEN** the user right-clicks the drop button and picks the default action
+- **THEN** the plugin tears down the MediaEngine voice transport so Discord
+  rebuilds it (staying in the call), resyncs the Aqua helper, and shows a
+  popup naming the reset
+
+#### Scenario: Menu cannot be shown
+
+- **WHEN** opening the context menu fails
+- **THEN** the plugin falls back to executing the default reset action
+  directly with the same popup feedback
