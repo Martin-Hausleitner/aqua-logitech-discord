@@ -22,6 +22,20 @@ Aqua Voice → Discord (paste) → Enter (after settle)
 Discord mute ← Vencord AquaMuteSync ← aqua-watch
 ```
 
+## Dead-bridge fallback: Enter after Copy
+
+`src/copy-enter.mjs` is an independent clipboard watcher for the case where
+the mouse bridge is unavailable. Set `AQUA_ENTER_AFTER_COPY=0` to disable it or
+choose a 50–150ms pre-Enter delay with `AQUA_COPY_ENTER_DELAY_MS` (default 100).
+It sends one synthetic Return for each distinct non-empty clipboard value,
+only when `:8690/status` is unreachable and the focused app is allowlisted.
+It never toggles Aqua or starts a second BLE path.
+
+```bash
+cd packages/mouse-bridge
+./scripts/install-copy-enter.sh
+```
+
 ## Settle heuristic (honest)
 
 Not an Aqua public API. Enter waits in `src/settle.mjs` for a **transcript** signal:
