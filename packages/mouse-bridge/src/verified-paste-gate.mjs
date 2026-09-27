@@ -194,10 +194,11 @@ export class VerifiedPasteGate {
       pending.signal?.removeEventListener("abort", pending.onAbort);
       pending.resolve(genericFailure(reason));
     }
-    try { child.kill?.(); } catch { /* fail closed */ }
+    // A failed proof process must not survive to deliver a late Enter.
+    try { child.kill?.("SIGKILL"); } catch { /* fail closed */ }
   }
 
-  _invalidateProcess() {
+  _invalidateProcess({ signal = "SIGKILL" } = {}) {
     const child = this.child;
     this.child = null;
     this.buffer = "";
@@ -208,7 +209,7 @@ export class VerifiedPasteGate {
       pending.signal?.removeEventListener("abort", pending.onAbort);
       pending.resolve(genericFailure("cancelled"));
     }
-    try { child?.kill?.(); } catch { /* fail closed */ }
+    try { child?.kill?.(signal); } catch { /* fail closed */ }
   }
 
   _request(op, token, fields = {}, { signal, timeoutMs } = {}) {
@@ -280,9 +281,7 @@ export class VerifiedPasteGate {
   cancel({ token } = {}) {
     if (token != null && this.activeToken !== token) return;
     this.activeToken = null;
-    const child = this.child;
     this._invalidateProcess();
-    try { child?.kill?.("SIGKILL"); } catch { /* stale helper cannot emit */ }
   }
 
   async close({ timeoutMs = 250, killTimeoutMs = 100 } = {}) {
@@ -294,7 +293,7 @@ export class VerifiedPasteGate {
       return;
     }
     const exited = waitForChildExit(child, timeoutMs);
-    this._invalidateProcess();
+    this._invalidateProcess({ signal: "SIGTERM" });
     if (await exited) return;
     try { child.kill?.("SIGKILL"); } catch { /* bounded shutdown */ }
     await waitForChildExit(child, killTimeoutMs);

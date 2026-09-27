@@ -82,6 +82,7 @@ const settings = definePluginSettings({
 
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let openingTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempt = 0;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let transitionMeasureTimer: ReturnType<typeof setTimeout> | null = null;
@@ -94,6 +95,7 @@ let overrideButton: HTMLButtonElement | null = null;
 const TRANSITION_POLL_MS = 25;
 const TRANSITION_TIMEOUT_MS = 1000;
 const RESTORE_VERIFY_MS = 1000;
+const OPENING_TIMEOUT_MS = 2000;
 
 /** Zustand der Sync-Maschine (Ownership liegt persistent in settings.store) */
 let syncEnabled = true;
@@ -773,6 +775,11 @@ function driftCheck() {
     }
 }
 
+function clearOpeningTimeout() {
+    if (openingTimer !== null) clearTimeout(openingTimer);
+    openingTimer = null;
+}
+
 function connect() {
     if (stopped || ws?.readyState === 0 || ws?.readyState === 1) return;
     let socket: WebSocket;
@@ -784,8 +791,18 @@ function connect() {
         return;
     }
     refreshHelperNotice();
+    openingTimer = setTimeout(() => {
+        if (stopped || ws !== socket) return;
+        clearOpeningTimeout();
+        if (socket.readyState !== 0) return;
+        ws = null;
+        try { socket.close(); } catch {}
+        refreshHelperNotice();
+        scheduleReconnect();
+    }, OPENING_TIMEOUT_MS);
     socket.onopen = () => {
         if (stopped || ws !== socket) return;
+        clearOpeningTimeout();
         reconnectAttempt = 0;
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
         helperConnected = true;
@@ -804,6 +821,7 @@ function connect() {
     };
     socket.onclose = () => {
         if (stopped || ws !== socket) return;
+        clearOpeningTimeout();
         ws = null;
         const hadConnection = helperConnected;
         helperConnected = false;
@@ -839,6 +857,7 @@ function scheduleReconnect() {
 function forceResync(reason: string) {
     console.info(`[AquaMuteSync] force-resync (${reason})`);
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    clearOpeningTimeout();
     const old = ws;
     ws = null;
     if (old) {
@@ -1156,6 +1175,7 @@ export default definePlugin({
             document.removeEventListener("pointerdown", onMuteButtonPointerDown, true);
         } catch {}
         if (reconnectTimer) clearTimeout(reconnectTimer);
+        clearOpeningTimeout();
         if (postClickReportTimer) clearTimeout(postClickReportTimer);
         if (startupProbeTimer) clearTimeout(startupProbeTimer);
         startupProbeTimer = null;
