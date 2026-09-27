@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '${{ matrix.node }}'
-      - run: node --test src/aqua-health-watchdog.test.mjs
+      - run: node --test src/aqua-health-watchdog.test.mjs src/aqua-latency-report.test.mjs
         working-directory: packages/mouse-bridge
       - run: sh -n packages/mouse-bridge/scripts/install-aqua-health-watchdog.sh
       - run: git diff --check

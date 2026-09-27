@@ -76,3 +76,7 @@ watchdog with:
 
 That activation concerns only `org.aqua.mouse-health-watchdog`; it does not
 install, start, deploy, sign, or modify the bridge or aqua-watch agents.
+
+## Timing report
+
+`node scripts/report-aqua-latency.mjs PATH_TO_BRIDGE_LOG` emits only timing metadata. It reports WAIT_SETTLE duration separately from verified Enter count. It does not measure speech backend or physical input latency. Fewer than20 samples produce no p95 estimate. Test with `node --test src/aqua-latency-report.test.mjs`.
