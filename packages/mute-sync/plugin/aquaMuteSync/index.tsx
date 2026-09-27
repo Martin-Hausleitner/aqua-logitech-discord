@@ -120,31 +120,72 @@ let outageNotified = false;
 let degradedNotified = false;
 let startupProbeTimer: ReturnType<typeof setTimeout> | null = null;
 
+let helperNotice: HTMLDivElement | null = null;
+let helperNoticeText: HTMLSpanElement | null = null;
+let helperNoticeRetry: HTMLButtonElement | null = null;
+let helperNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearHelperNotice() {
+    if (helperNoticeTimer) clearTimeout(helperNoticeTimer);
+    helperNoticeTimer = null;
+    helperNotice?.remove();
+    helperNotice = null;
+    helperNoticeText = null;
+    helperNoticeRetry = null;
+}
+
+function renderHelperNotice(connected: boolean) {
+    if (stopped) { clearHelperNotice(); return; }
+    if (helperNoticeTimer) clearTimeout(helperNoticeTimer);
+    helperNoticeTimer = null;
+    if (!helperNotice?.isConnected) {
+        const notice = document.createElement("div");
+        notice.id = "vc-aqua-connection-status";
+        notice.setAttribute("role", "status");
+        notice.setAttribute("aria-live", "polite");
+        notice.style.cssText = "position:fixed;bottom:80px;right:20px;z-index:10000;max-width:360px;padding:12px 16px;border-radius:8px;background:var(--background-floating,#202127);color:var(--text-normal,#fff);box-shadow:0 4px 16px #0005;display:flex;gap:10px;align-items:center;font-size:14px";
+        const text = document.createElement("span");
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.textContent = "Neu verbinden";
+        retry.style.cssText = "border:0;border-radius:4px;padding:6px 10px;background:var(--brand-500,#5865f2);color:#fff;cursor:pointer";
+        retry.addEventListener("click", () => {
+            if (stopped || helperConnected) return;
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+            // Do not create a second producer while a connection is opening.
+            if (ws?.readyState === 0 || ws?.readyState === 1) return;
+            connect();
+        });
+        const dismiss = document.createElement("button");
+        dismiss.type = "button";
+        dismiss.textContent = "×";
+        dismiss.setAttribute("aria-label", "Aqua-Verbindungsstatus schließen");
+        dismiss.style.cssText = "border:0;background:transparent;color:inherit;font-size:20px;cursor:pointer";
+        dismiss.addEventListener("click", clearHelperNotice);
+        notice.append(text, retry, dismiss);
+        document.body.append(notice);
+        helperNotice = notice;
+        helperNoticeText = text;
+        helperNoticeRetry = retry;
+    }
+    helperNoticeText!.textContent = connected
+        ? "Aqua verbunden"
+        : "Aqua-Verbindung unterbrochen. Automatische Wiederverbindung läuft.";
+    helperNoticeRetry!.hidden = connected;
+    if (connected) helperNoticeTimer = setTimeout(clearHelperNotice, 4000);
+}
+
 function notifyHelperDown(reason: string) {
     if (outageNotified) return;
     outageNotified = true;
-    try {
-        showNotification({
-            title: "AquaMuteSync ❌ NICHT verbunden",
-            body: `${reason} — Aqua→Discord-Mute ist AUS. Klick hier: sofort neu verbinden. Wenn das nicht hilft, im Terminal: launchctl kickstart -k gui/501/org.n281.aqua-watch`,
-            permanent: true,
-            onClick: () => {
-                if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-                connect();
-            }
-        });
-    } catch {}
+    console.warn(`[AquaMuteSync] helper unavailable: ${reason}`);
+    try { renderHelperNotice(false); } catch {}
 }
 
 function notifyHelperRestored() {
     if (!outageNotified) return;
     outageNotified = false;
-    try {
-        showNotification({
-            title: "AquaMuteSync ✅ verbunden",
-            body: "Helper wieder da — Aqua→Discord-Mute-Sync aktiv."
-        });
-    } catch {}
+    try { renderHelperNotice(true); } catch {}
 }
 
 function notifyDegraded() {
@@ -1064,6 +1105,7 @@ export default definePlugin({
 
     stop() {
         stopped = true;
+        clearHelperNotice();
         if (domObserver) {
             domObserver.disconnect();
             domObserver = null;

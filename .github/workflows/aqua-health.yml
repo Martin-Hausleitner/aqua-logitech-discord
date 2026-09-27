@@ -54,6 +54,6 @@ jobs:
         working-directory: packages/mute-sync/helper
       - run: npm ci --ignore-scripts
         working-directory: packages/mute-sync
-      - run: node --test *.test.mjs ../plugin/aquaMuteSync/index.test.mjs
+      - run: node --test *.test.mjs ../plugin/aquaMuteSync/*.test.mjs
         working-directory: packages/mute-sync/helper
       - run: node --check packages/mute-sync/helper/aqua-watch.mjs

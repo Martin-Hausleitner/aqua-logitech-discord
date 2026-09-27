@@ -48,6 +48,11 @@ helper/aqua-mic-watch  (Swift)  ──"START"/"STOP"──▶  helper/aqua-watch
 
 ## Wiederherstellung und Grenzen
 
+Die Aqua-Verbindungsanzeige aktualisiert einen eigenen Statushinweis direkt:
+Ausfall → verbunden → nach vier Sekunden ausgeblendet. Ein erneuter Ausfall
+widerruft den alten Ausblend-Timer. Sie blockiert keine Vencord-Meldungswarteschlange;
+„Neu verbinden“ bleibt auf tatsächlich getrennte Verbindungen beschränkt.
+
 - WebSocket-Ping/Pong prüft alle 30 Sekunden den Transport. Eine Verbindung ohne
   Antwort wird beim nächsten Intervall beendet (typisch 30–60 Sekunden nach
   Verbindung, spätestens ein Intervall nach dem ausstehenden Ping). Der bestehende
@@ -69,7 +74,7 @@ cd packages/mute-sync
 npm ci --ignore-scripts
 cd helper
 npm ci --ignore-scripts
-node --test *.test.mjs ../plugin/aquaMuteSync/index.test.mjs
+node --test *.test.mjs ../plugin/aquaMuteSync/*.test.mjs
 ```
 
 ## OSS-Stack

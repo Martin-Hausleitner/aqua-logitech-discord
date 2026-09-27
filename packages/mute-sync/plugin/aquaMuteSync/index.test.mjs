@@ -695,9 +695,9 @@ test("shows one outage notification per disconnect phase with an immediate-recon
     assert.match(source, /import \{ showNotification \} from "@api\/Notifications";/);
     const down = functionBody("notifyHelperDown");
     assert.match(down, /if \(outageNotified\) return;/);
-    assert.match(down, /permanent: true/);
-    assert.match(down, /launchctl kickstart -k gui\/501\/org\.n281\.aqua-watch/);
-    assert.match(down, /connect\(\);/);
+    assert.match(down, /renderHelperNotice\(false\)/);
+    assert.doesNotMatch(down, /showNotification|permanent/);
+    assert.match(functionBody("renderHelperNotice"), /connect\(\);/);
     const restored = functionBody("notifyHelperRestored");
     assert.match(restored, /if \(!outageNotified\) return;/);
     assert.match(source, /if \(!stopped && hadConnection\) notifyHelperDown/);
