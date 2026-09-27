@@ -37,13 +37,45 @@ helper/aqua-mic-watch  (Swift)  ──"START"/"STOP"──▶  helper/aqua-watch
 
 ## ⚠️ Betriebshinweise
 
-- **BetterVencordPatch-Wechselwirkung:** Der LaunchAgent `org.aaron.autovencordpatch`
-  kann bei Discord-Updates die Stock-Vencord-dist neu installieren und damit das
-  Custom-Plugin still entfernen. Nach jedem Discord-Update prüfen:
-  `grep -c AquaMuteSync "~/Library/Application Support/Vencord/dist/renderer.js"` —
-  wenn 0 → `scripts/deploy.sh` erneut ausführen.
+- Auf dem betreuten Mac übernimmt der stille `local.mh.vencord-auto-repair`
+  die Installationsprüfung. Konkurrierende Stock-/GUI-Patcher bleiben deaktiviert.
+  Reparaturen erfolgen nur bei geschlossenem Discord und stabilen Update-Dateien;
+  die eigene Distribution und Plugin-Einstellungen bleiben erhalten.
+- Discord und den Helper nicht während eines laufenden Anrufs oder einer Aufnahme
+  für diese Aktualisierung neu laden. Quellcode-Tests ersetzen keine Live-Abnahme.
 - Der Helper ist rein beobachtend (CoreAudio-Property-Reads + Datei-mtimes),
   greift NIE in Aqua ein und hält kein Mikrofon offen.
+
+## Wiederherstellung und Grenzen
+
+Die Aqua-Verbindungsanzeige aktualisiert einen eigenen Statushinweis direkt:
+Ausfall → verbunden → nach vier Sekunden ausgeblendet. Ein erneuter Ausfall
+widerruft den alten Ausblend-Timer. Sie blockiert keine Vencord-Meldungswarteschlange;
+„Neu verbinden“ bleibt auf tatsächlich getrennte Verbindungen beschränkt.
+
+- WebSocket-Ping/Pong prüft alle 30 Sekunden den Transport. Eine Verbindung ohne
+  Antwort wird beim nächsten Intervall beendet (typisch 30–60 Sekunden nach
+  Verbindung, spätestens ein Intervall nach dem ausstehenden Ping). Der bestehende
+  Disconnect-Pfad gibt den Status-Producer frei. Das beweist keine Renderer-Funktion.
+- Ein Watcher-Startfehler oder -Exit plant genau einen neuen Versuch nach drei
+  Sekunden. Ein fehlgeschlagener, noch laufender Prozess muss zunächst enden;
+  Shutdown entfernt geplante Versuche. Ein nicht beendbarer Prozess blockiert
+  einen Ersatz, statt zwei widersprüchliche Aufnahme-Watcher zu starten.
+- Ohne CoreAudio-Erkennung bleibt der letzte Aufnahmestatus erhalten, bis neue
+  Evidenz vorliegt. Zeitablauf allein meldet keinen Stopp.
+- Nach einem unklaren Reconnect kann das Plugin stumm bleiben. Automatisches
+  Entstummen braucht gesicherte Helper-/Aufnahme-Kontinuität und muss manuelle
+  Entscheidungen erhalten; dieser Protokollschritt ist noch offen.
+
+Regressionen mit isolierten Prozess-/Dateigrenzen und echtem Loopback-Transport:
+
+```sh
+cd packages/mute-sync
+npm ci --ignore-scripts
+cd helper
+npm ci --ignore-scripts
+node --test *.test.mjs ../plugin/aquaMuteSync/*.test.mjs
+```
 
 ## OSS-Stack
 
