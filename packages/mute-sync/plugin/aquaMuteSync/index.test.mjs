@@ -700,7 +700,8 @@ test("shows one outage notification per disconnect phase with an immediate-recon
     assert.match(functionBody("renderHelperNotice"), /connect\(\);/);
     const restored = functionBody("notifyHelperRestored");
     assert.match(restored, /if \(!outageNotified\) return;/);
-    assert.match(source, /if \(!stopped && hadConnection\) notifyHelperDown/);
+    assert.match(functionBody("connect"), /if \(stopped \|\| ws !== socket\) return;/);
+    assert.match(source, /if \(hadConnection\) notifyHelperDown/);
     assert.match(source, /if \(!stopped && !helperConnected\) notifyHelperDown\("Helper beim Start nicht erreichbar"\)/);
     assert.match(source, /notifyDegraded\(\)/);
 });

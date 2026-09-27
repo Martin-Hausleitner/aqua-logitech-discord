@@ -82,6 +82,7 @@ const settings = definePluginSettings({
 
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let reconnectAttempt = 0;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let transitionMeasureTimer: ReturnType<typeof setTimeout> | null = null;
 let restoreVerifyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -122,6 +123,7 @@ let startupProbeTimer: ReturnType<typeof setTimeout> | null = null;
 
 let helperNotice: HTMLDivElement | null = null;
 let helperNoticeText: HTMLSpanElement | null = null;
+let helperNoticeDetail: HTMLSpanElement | null = null;
 let helperNoticeRetry: HTMLButtonElement | null = null;
 let helperNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -131,6 +133,7 @@ function clearHelperNotice() {
     helperNotice?.remove();
     helperNotice = null;
     helperNoticeText = null;
+    helperNoticeDetail = null;
     helperNoticeRetry = null;
 }
 
@@ -143,36 +146,58 @@ function renderHelperNotice(connected: boolean) {
         notice.id = "vc-aqua-connection-status";
         notice.setAttribute("role", "status");
         notice.setAttribute("aria-live", "polite");
-        notice.style.cssText = "position:fixed;bottom:80px;right:20px;z-index:10000;max-width:360px;padding:12px 16px;border-radius:8px;background:var(--background-floating,#202127);color:var(--text-normal,#fff);box-shadow:0 4px 16px #0005;display:flex;gap:10px;align-items:center;font-size:14px";
+        notice.setAttribute("aria-atomic", "true");
+        notice.style.cssText = "position:fixed;bottom:80px;right:16px;z-index:10000;width:340px;max-width:calc(100vw - 32px);box-sizing:border-box;padding:14px;border:1px solid var(--border-subtle,#ffffff20);border-radius:14px;background:var(--background-floating,#202127);color:var(--text-normal,#fff);box-shadow:0 8px 28px #0004;display:flex;flex-wrap:wrap;gap:10px;align-items:center;font:14px/1.4 var(--font-primary,sans-serif)";
+        const copy = document.createElement("div");
+        copy.style.cssText = "flex:1 1 210px;min-width:0";
         const text = document.createElement("span");
+        text.style.cssText = "display:block;font-weight:600;font-size:14px";
+        const detail = document.createElement("span");
+        detail.style.cssText = "display:block;margin-top:3px;color:var(--text-muted,#b5bac1);font-size:12px;overflow-wrap:anywhere";
+        copy.append(text, detail);
         const retry = document.createElement("button");
         retry.type = "button";
-        retry.textContent = "Neu verbinden";
-        retry.style.cssText = "border:0;border-radius:4px;padding:6px 10px;background:var(--brand-500,#5865f2);color:#fff;cursor:pointer";
+        retry.textContent = "Jetzt verbinden";
+        retry.style.cssText = "min-height:32px;border:0;border-radius:8px;padding:6px 12px;background:var(--brand-500,#5865f2);color:#fff;font:inherit;font-size:12px;font-weight:600;cursor:pointer";
         retry.addEventListener("click", () => {
             if (stopped || helperConnected) return;
-            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-            // Do not create a second producer while a connection is opening.
             if (ws?.readyState === 0 || ws?.readyState === 1) return;
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
             connect();
         });
         const dismiss = document.createElement("button");
         dismiss.type = "button";
         dismiss.textContent = "×";
         dismiss.setAttribute("aria-label", "Aqua-Verbindungsstatus schließen");
-        dismiss.style.cssText = "border:0;background:transparent;color:inherit;font-size:20px;cursor:pointer";
+        dismiss.style.cssText = "min-width:32px;min-height:32px;margin-left:auto;border:0;border-radius:8px;background:transparent;color:inherit;font-size:22px;line-height:1;cursor:pointer";
         dismiss.addEventListener("click", clearHelperNotice);
-        notice.append(text, retry, dismiss);
+        for (const button of [retry, dismiss]) {
+            button.addEventListener("focus", () => { button.style.outline = "2px solid var(--text-normal,#fff)"; button.style.outlineOffset = "2px"; });
+            button.addEventListener("blur", () => { button.style.outline = ""; });
+        }
+        notice.append(copy, retry, dismiss);
         document.body.append(notice);
         helperNotice = notice;
         helperNoticeText = text;
+        helperNoticeDetail = detail;
         helperNoticeRetry = retry;
     }
-    helperNoticeText!.textContent = connected
-        ? "Aqua verbunden"
-        : "Aqua-Verbindung unterbrochen. Automatische Wiederverbindung läuft.";
+    const connecting = !connected && ws?.readyState === 0;
+    helperNoticeText!.textContent = connected ? "Aqua ist wieder verbunden" : "Aqua-Verbindung unterbrochen";
+    helperNoticeDetail!.textContent = connected
+        ? "Die Verbindung zu Discord ist wieder verfügbar."
+        : "Die Mikrofon-Synchronisierung ist unterbrochen. Wir verbinden automatisch neu.";
     helperNoticeRetry!.hidden = connected;
+    helperNoticeRetry!.disabled = connecting;
+    helperNoticeRetry!.textContent = connecting ? "Verbinde …" : "Jetzt verbinden";
+    helperNoticeRetry!.style.opacity = connecting ? "0.65" : "1";
+    helperNoticeRetry!.style.cursor = connecting ? "wait" : "pointer";
     if (connected) helperNoticeTimer = setTimeout(clearHelperNotice, 4000);
+}
+
+function refreshHelperNotice() {
+    // A dismissed outage must stay dismissed until a distinct outage occurs.
+    if (helperNotice?.isConnected) renderHelperNotice(helperConnected);
 }
 
 function notifyHelperDown(reason: string) {
@@ -749,14 +774,20 @@ function driftCheck() {
 }
 
 function connect() {
-    if (stopped) return;
+    if (stopped || ws?.readyState === 0 || ws?.readyState === 1) return;
+    let socket: WebSocket;
     try {
-        ws = new WebSocket(`ws://127.0.0.1:${settings.store.port}`);
+        socket = new WebSocket(`ws://127.0.0.1:${settings.store.port}`);
+        ws = socket;
     } catch {
         scheduleReconnect();
         return;
     }
-    ws.onopen = () => {
+    refreshHelperNotice();
+    socket.onopen = () => {
+        if (stopped || ws !== socket) return;
+        reconnectAttempt = 0;
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
         helperConnected = true;
         statusClientSeq = 0;
         lastReportedMute = null;
@@ -765,12 +796,15 @@ function connect() {
         reportDiscordMute(true);
         notify();
     };
-    ws.onmessage = e => {
+    socket.onmessage = e => {
+        if (stopped || ws !== socket) return;
         try {
             handleIncomingMessage(JSON.parse(e.data));
         } catch { /* ignore */ }
     };
-    ws.onclose = () => {
+    socket.onclose = () => {
+        if (stopped || ws !== socket) return;
+        ws = null;
         const hadConnection = helperConnected;
         helperConnected = false;
         lastReportedMute = null;
@@ -778,21 +812,24 @@ function connect() {
         aquaRecording = false;
         latestStateTuple = null;
         activeBaselineProvenance = null;
-        if (!stopped && hadConnection) notifyHelperDown("Verbindung zum aqua-watch-Helper verloren");
+        if (hadConnection) notifyHelperDown("Verbindung zum Aqua-Helfer verloren");
+        refreshHelperNotice();
         notify();
-        // Sicher-Verhalten: gehaltenes Mute NICHT blind lösen — Zustand wird beim
-        // Reconnect per state-Message neu synchronisiert (Spec: Reconnect-Szenario).
+        // Kept mute is never blindly released after losing cycle provenance.
         scheduleReconnect();
     };
-    ws.onerror = () => ws?.close();
+    socket.onerror = () => {
+        if (!stopped && ws === socket) socket.close();
+    };
 }
 
 function scheduleReconnect() {
     if (stopped || reconnectTimer) return;
+    const delay = [250, 1000, 3000][Math.min(reconnectAttempt++, 2)];
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         connect();
-    }, 3000);
+    }, delay);
 }
 
 /** Rechtsklick auf den Tropfen: harter Neu-Sync. Alte Verbindung STILL
@@ -1043,6 +1080,7 @@ export default definePlugin({
         // Only an explicit persisted boolean enables automatic writers.
         syncEnabled = settings.store.autoSync === true;
         helperConnected = false;
+        reconnectAttempt = 0;
         helperDegraded = false;
         aquaRecording = false;
         lastSeq = -1;
@@ -1137,6 +1175,8 @@ export default definePlugin({
         latestHookSeq = null;
         latestBridgeTuple = null;
         latestStateTuple = null;
-        ws?.close();
+        const oldSocket = ws;
+        ws = null;
+        oldSocket?.close();
     }
 });
