@@ -21,3 +21,21 @@ jobs:
         working-directory: packages/mouse-bridge
       - run: sh -n packages/mouse-bridge/scripts/install-aqua-health-watchdog.sh
       - run: git diff --check
+  bridge-regressions:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [18, 22, 26]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '${{ matrix.node }}'
+      - run: npm test
+        working-directory: packages/mouse-bridge
+  native-paste-gate:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./packages/mouse-bridge/scripts/build-verified-paste-gate.sh
+      - run: sh -n packages/mouse-bridge/scripts/install-bridge.sh
