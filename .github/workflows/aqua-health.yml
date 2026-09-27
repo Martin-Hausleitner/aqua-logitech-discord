@@ -1,0 +1,23 @@
+name: Aqua health safety gates
+on:
+  push:
+    paths: ['packages/mouse-bridge/**', '.github/workflows/aqua-health.yml']
+  pull_request:
+    paths: ['packages/mouse-bridge/**', '.github/workflows/aqua-health.yml']
+permissions:
+  contents: read
+jobs:
+  health-safety:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [18, 22, 26]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '${{ matrix.node }}'
+      - run: node --test src/aqua-health-watchdog.test.mjs
+        working-directory: packages/mouse-bridge
+      - run: sh -n packages/mouse-bridge/scripts/install-aqua-health-watchdog.sh
+      - run: git diff --check
