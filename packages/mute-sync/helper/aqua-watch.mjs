@@ -22,6 +22,8 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { StatusState } from "./status-state.mjs";
+import { createWebSocketHealth } from "./websocket-health.mjs";
+import { createWatcherSupervisor } from "./watcher-supervisor.mjs";
 
 const PORT = Number(process.env.AQUA_WATCH_PORT ?? 8688);
 const NEEDLE = process.env.AQUA_WATCH_NEEDLE ?? "aqua";
@@ -30,19 +32,17 @@ const MIC_TIMINGS = join(AQUA_DIR, "mic_timings.json");
 const AUDIO_DIR = join(AQUA_DIR, "audio");
 const WATCHER_BIN = join(dirname(fileURLToPath(import.meta.url)), "aqua-mic-watch");
 const POLL_MS = 50;
-// Nur im degraded mode (Eventkanal tot): Aufnahme ohne Stop-Signal gilt nach
-// STALE_MS als beendet (Aqua-Diktate sind kurz; wav-Stopp feuert normalerweise früher).
-const STALE_MS = 120_000;
 // AQUA_WATCH_CONTROL=0 verriegelt jede Steuer-/Relay-Route (set_recording mit
 // source=control, set_mute/toggle_mute/aqua_toggle) — Pflicht im Physical-Run-Fenster.
 const CONTROL_ENABLED = process.env.AQUA_WATCH_CONTROL !== "0";
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
-let lastChange = Date.now();
 let eventChannelAlive = false;
-let child = null;
 const status = new StatusState();
+status.setDegraded(true);
+let activeWatcherGeneration = null;
+const websocketHealth = createWebSocketHealth();
 
 const stateMsg = () => JSON.stringify(status.snapshot());
 
@@ -54,7 +54,6 @@ function setRecording(next, src, metadata) {
         return;
     }
     if (!status.setRecording(next, src, metadata)) return;
-    lastChange = Date.now();
     log(`recording=${next} (${src}) seq=${status.seq}`);
     broadcastState();
 }
@@ -68,6 +67,7 @@ function startServer() {
     wss = new WebSocketServer({ host: "127.0.0.1", port: PORT });
     wss.on("connection", (ws) => {
         const client = Symbol("ws-client");
+        websocketHealth.track(ws);
         ws.send(stateMsg());
         ws.on("message", (buf) => {
             try {
@@ -102,6 +102,7 @@ function startServer() {
             } catch { /* ignore */ }
         });
         ws.on("close", () => {
+            websocketHealth.untrack(ws);
             if (status.disconnect(client)) broadcastState();
         });
     });
@@ -122,40 +123,43 @@ function startServer() {
 }
 
 // ── Kanal 1: CoreAudio-Events via Swift-Binary ────────────────────────────────
-function startEventChannel() {
-    try {
-        child = spawn(WATCHER_BIN, [NEEDLE], { stdio: ["ignore", "pipe", "inherit"] });
-    } catch (e) {
-        log("event channel unavailable:", e.message);
-        return;
-    }
-    eventChannelAlive = true;
-    if (status.setDegraded(false)) broadcastState();
-    let buf = "";
-    child.stdout.on("data", (d) => {
-        buf += d.toString();
-        let i;
-        while ((i = buf.indexOf("\n")) >= 0) {
-            const line = buf.slice(0, i).trim();
-            buf = buf.slice(i + 1);
-            if (line === "START") setRecording(true, "coreaudio");
-            else if (line === "STOP") setRecording(false, "coreaudio");
-            else if (line === "TRUTH 1" || line === "TRUTH 0") {
-                const correction = status.noteTruth(line === "TRUTH 1");
-                if (correction !== null) {
-                    log(`inversion corrected -> recording=${correction} (mic truth, #${status.inversionsCorrected})`);
-                    setRecording(correction, "coreaudio");
+const watcherSupervisor = createWatcherSupervisor({
+    spawnImpl: spawn,
+    executable: WATCHER_BIN,
+    args: [NEEDLE],
+    options: { stdio: ["ignore", "pipe", "inherit"] },
+    onSpawn(child, { generation }) {
+        activeWatcherGeneration = generation;
+        eventChannelAlive = true;
+        if (status.setDegraded(false)) broadcastState();
+        let buf = "";
+        child.stdout.on("data", (d) => {
+            // Ignore buffered output from a failed or replaced watcher.
+            if (!eventChannelAlive || activeWatcherGeneration !== generation) return;
+            buf += d.toString();
+            let i;
+            while ((i = buf.indexOf("\n")) >= 0) {
+                const line = buf.slice(0, i).trim();
+                buf = buf.slice(i + 1);
+                if (line === "START") setRecording(true, "coreaudio");
+                else if (line === "STOP") setRecording(false, "coreaudio");
+                else if (line === "TRUTH 1" || line === "TRUTH 0") {
+                    const correction = status.noteTruth(line === "TRUTH 1");
+                    if (correction !== null) {
+                        log(`inversion corrected -> recording=${correction} (mic truth, #${status.inversionsCorrected})`);
+                        setRecording(correction, "coreaudio");
+                    }
                 }
             }
-        }
-    });
-    child.on("exit", (code) => {
+        });
+    },
+    onFailure({ phase, detail }) {
+        activeWatcherGeneration = null;
         eventChannelAlive = false;
         if (status.setDegraded(true)) broadcastState();
-        log(`aqua-mic-watch exited (${code}), restarting in 3s`);
-        setTimeout(startEventChannel, 3000);
-    });
-}
+        log(`aqua-mic-watch ${phase}; retry after termination in 3s`, detail?.message ?? detail ?? "");
+    },
+});
 
 // ── Kanal 2: Poll-Doppelcheck (nur degraded mode) ────────────────────────────
 const mtimeOf = (p) => { try { return statSync(p).mtimeMs; } catch { return 0; } };
@@ -187,20 +191,21 @@ setInterval(() => {
         lastWav = w;
         if (!eventChannelAlive) setRecording(false, "poll:wav");
     }
-    if (status.recording && !eventChannelAlive && Date.now() - lastChange > STALE_MS) {
-        setRecording(false, "poll:stale");
-    }
+    // Elapsed time alone is not evidence that a degraded recording stopped.
 }, POLL_MS);
 
 // ── sauberer Shutdown (LaunchAgent unload / SIGTERM) ─────────────────────────
 for (const sig of ["SIGTERM", "SIGINT"]) {
     process.on(sig, () => {
         log(`${sig} — shutting down`);
-        try { child?.kill(); } catch { /* ignore */ }
+        activeWatcherGeneration = null;
+        eventChannelAlive = false;
+        watcherSupervisor.stop();
+        websocketHealth.close();
         try { wss?.close(); } catch { /* ignore */ }
         process.exit(0);
     });
 }
 
 startServer();
-startEventChannel();
+watcherSupervisor.start();

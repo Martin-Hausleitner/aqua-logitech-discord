@@ -1,9 +1,9 @@
 name: Aqua health safety gates
 on:
   push:
-    paths: ['packages/mouse-bridge/**', '.github/workflows/aqua-health.yml']
+    paths: ['packages/mouse-bridge/**', 'packages/mute-sync/**', '.github/workflows/aqua-health.yml']
   pull_request:
-    paths: ['packages/mouse-bridge/**', '.github/workflows/aqua-health.yml']
+    paths: ['packages/mouse-bridge/**', 'packages/mute-sync/**', '.github/workflows/aqua-health.yml']
 permissions:
   contents: read
 jobs:
@@ -39,3 +39,21 @@ jobs:
       - uses: actions/checkout@v4
       - run: ./packages/mouse-bridge/scripts/build-verified-paste-gate.sh
       - run: sh -n packages/mouse-bridge/scripts/install-bridge.sh
+
+  mute-transport:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [18, 22, 26]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '${{ matrix.node }}'
+      - run: npm ci --ignore-scripts
+        working-directory: packages/mute-sync/helper
+      - run: npm ci --ignore-scripts
+        working-directory: packages/mute-sync
+      - run: node --test *.test.mjs ../plugin/aquaMuteSync/index.test.mjs
+        working-directory: packages/mute-sync/helper
+      - run: node --check packages/mute-sync/helper/aqua-watch.mjs
