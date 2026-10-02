@@ -18,6 +18,7 @@ export class StatusState {
         this.confirmation = null;
         this.apps = new Map(apps.map(app => [app, {
             muted: null,
+            autoSync: null,
             online: false,
             seq: 0,
             ts: 0
@@ -114,6 +115,28 @@ export class StatusState {
         return true;
     }
 
+    reportAutoSync(client, message) {
+        const { app, enabled, clientSeq } = message;
+        const state = this.apps.get(app);
+        if (!state || app !== "discord" || typeof enabled !== "boolean" || !Number.isSafeInteger(clientSeq) || clientSeq < 0) return false;
+        let clientState = this.lastClientSeq.get(client);
+        if (!clientState) this.lastClientSeq.set(client, clientState = new Map());
+        const key = `${app}:autoSync`;
+        if (clientSeq <= (clientState.get(key) ?? -1)) return false;
+        clientState.set(key, clientSeq);
+        const priorProducer = this.producers.get(app);
+        if (priorProducer && priorProducer !== client && state.online) return false;
+        const changed = priorProducer !== client || !state.online || state.autoSync !== enabled;
+        this.producers.set(app, client);
+        if (!changed) return false;
+        state.autoSync = enabled;
+        state.online = true;
+        state.seq++;
+        state.ts = this.now();
+        this.seq++;
+        return true;
+    }
+
     disconnect(client) {
         this.lastClientSeq.delete(client);
         let changed = false;
@@ -122,6 +145,7 @@ export class StatusState {
             this.producers.delete(app);
             const state = this.apps.get(app);
             state.muted = null;
+            state.autoSync = null;
             state.online = false;
             state.seq++;
             state.ts = this.now();

@@ -72,6 +72,8 @@ function startServer() {
                 if (m.type === "get_state") ws.send(stateMsg());
                 else if (m.v === 1 && m.type === "app_state" && status.reportApp(client, m))
                     broadcastState();
+                else if (m.v === 1 && m.type === "set_auto_sync" && status.reportAutoSync(client, m))
+                    broadcastState();
                 else if (m.type === "set_recording") {
                     if (typeof m.recording !== "boolean") return;
                     const source = m.source || "control";
