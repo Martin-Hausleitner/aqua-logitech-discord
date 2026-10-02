@@ -21,6 +21,8 @@ enum Cmd: String {
     case fnDown = "fn-down"
     case fnUp = "fn-up"
     case enter = "enter"
+    case reload = "reload"
+    case devtools = "devtools"
 }
 
 func postKey(_ virtualKey: CGKeyCode, down: Bool, flags: CGEventFlags = []) {
@@ -60,6 +62,29 @@ case .fnUp:
     postKey(63, down: false, flags: [])
 case .enter:
     tapOnce(36)
+case .reload:
+    // Cmd down (55), R down (15), R up (15), Cmd up (55)
+    postKey(55, down: true, flags: .maskCommand)
+    usleep(20_000)
+    postKey(15, down: true, flags: .maskCommand)
+    usleep(30_000)
+    postKey(15, down: false, flags: .maskCommand)
+    usleep(20_000)
+    postKey(55, down: false, flags: [])
+case .devtools:
+    // Cmd (55) + Option (58) + I (34)
+    let flags: CGEventFlags = [.maskCommand, .maskAlternate]
+    postKey(55, down: true, flags: flags)
+    usleep(10_000)
+    postKey(58, down: true, flags: flags)
+    usleep(20_000)
+    postKey(34, down: true, flags: flags)
+    usleep(30_000)
+    postKey(34, down: false, flags: flags)
+    usleep(20_000)
+    postKey(58, down: false, flags: .maskCommand)
+    usleep(10_000)
+    postKey(55, down: false, flags: [])
 }
 
 usleep(10_000)

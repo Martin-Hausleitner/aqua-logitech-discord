@@ -95,14 +95,23 @@ func refresh() {
     recompute()
 }
 
-// Verdrehungserkennung: periodische Ist-Wahrheit (nicht nur Übergänge) —
-// der Helper korrigiert damit stabile Inversionen nach Tap-Salven.
+// Schneller Polling-Check + periodische Ist-Wahrheit:
+// recompute() wird alle 25ms aufgerufen, damit START/STOP sofort (<25ms)
+// emittiert wird, ohne auf verzögerte CoreAudio-Listener zu warten.
+var tickCount = 0
 let truthTimer = DispatchSource.makeTimerSource(queue: queue)
-truthTimer.schedule(deadline: .now() + 0.5, repeating: 0.5)
+truthTimer.schedule(deadline: .now() + 0.025, repeating: 0.025)
 truthTimer.setEventHandler {
-    let state = watched.contains { isRunningInput($0) }
-    print("TRUTH \(state ? 1 : 0)")
-    fflush(stdout)
+    recompute()
+    tickCount += 1
+    if tickCount % 40 == 0 { // alle 1s refresh()
+        refresh()
+    }
+    if tickCount % 10 == 0 { // alle 250ms TRUTH
+        let state = watched.contains { isRunningInput($0) }
+        print("TRUTH \(state ? 1 : 0)")
+        fflush(stdout)
+    }
 }
 truthTimer.resume()
 

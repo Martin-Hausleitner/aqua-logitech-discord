@@ -16,7 +16,8 @@ G HUB currently has a macro `cm enter` (Cmd+Enter) on `prox2wirelessmouse_g4_m1`
 ```
 G HUB side button → scripts/ghub/*.sh (curl) / AquaButton1.app
        → mouse-bridge :8690 (state machine)
-            ├─ hid-tap  Fn latch / Fn PTT / Enter   (CGEvent HID tap)
+            ├─ hid-tap  Fn latch / Fn PTT            (CGEvent HID tap)
+            ├─ verified-paste-gate                  (native AX proof + PID-targeted Enter)
             └─ aqua-watch :8688                 (recording settle signal)
 Aqua Voice → Discord (paste) → Enter (after settle)
 Discord mute ← Vencord AquaMuteSync ← aqua-watch
@@ -36,15 +37,26 @@ cd packages/mouse-bridge
 ./scripts/install-copy-enter.sh
 ```
 
-## Settle heuristic (honest)
+## Verified Enter gate
 
-Not an Aqua public API. Enter waits in `src/settle.mjs` for a **transcript** signal:
+The bridge does not treat a timestamp or an elapsed delay as proof that a paste
+landed. On a production run, `verified-paste-gate` is a persistent native Swift
+helper for that run:
 
-1. `aqua-watch` recording true→false (must stop first)
-2. **New `history.json` transcription timestamp** (primary — paste/persist done)
-3. or `history.json` mtime advance / clipboard change
-4. short `postTranscriptMs` delay so text can land in the focused field
-5. **No early quiet/wav Enter** — WAV means “file written”, not “transcription finished”. On timeout, Enter is skipped (avoids empty Discord sends).
+1. Before Fn-down, it captures the front PID, AX window, focused editable
+   element, UTF-16 selection, and value. Plaintext stays in helper memory.
+2. After recording stops, `history.json` must contain exactly one fresh,
+   schema-known transcription with integer `sessionId` and string `content`.
+   `rawText`, unknown schemas, equal-timestamp ties, and ambiguous concurrent
+   history updates fail closed.
+3. The helper polls for the exact expected insertion/replacement in the same
+   value, revalidates permission, PID, window, focused element, selection, and
+   value immediately before posting. It prepares Enter with cleared modifier
+   flags and posts both events to the captured PID; Node has no Enter fallback.
+4. A missing AX/text/selection proof, focus/app change, helper failure, or the
+   45-second settle timeout suppresses Enter while recording controls continue.
+
+The hot poll reads cached history metadata, skips audio-directory scans, and does not spawn `pbpaste`. `config.autoSubmit` must be `true`; `AQUA_AUTO_SUBMIT=0` suppresses every Enter. Codex is included in the default target list. Configure `AQUA_AUTO_ENTER_APPS` for the intended apps. `/status` reports proof-gate metrics; `enterCount` means the helper posted Enter after proof, never that the destination accepted or submitted the message.
 
 **Proven on this Mac (2026-07-24):** latched-Fn Button1 toggle → `recording:true/false`; settle must use `history_ts` (quiet/wav was the Enter-too-early bug). PTT API path; PTT then Button1 = Enter only. **Not proven:** physical G4/G5; Discord mute while plugin `online=false`.
 
@@ -53,6 +65,7 @@ Not an Aqua public API. Enter waits in `src/settle.mjs` for a **transcript** sig
 ```bash
 cd packages/mouse-bridge
 ./scripts/build-hid.sh
+./scripts/build-verified-paste-gate.sh
 ./scripts/install-bridge.sh   # LaunchAgent org.aqua.mouse-bridge
 npm test
 # repo root:

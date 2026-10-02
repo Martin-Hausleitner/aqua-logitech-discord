@@ -10,6 +10,7 @@ NODE_BIN="$(command -v node)"
 LOG="$HOME/Library/Logs/aqua-mouse-bridge.log"
 
 "$REPO/scripts/build-hid.sh"
+"$REPO/scripts/build-verified-paste-gate.sh"
 
 cat > "$PLIST_DST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
