@@ -10,6 +10,7 @@ test("button1 toggle start then stop → settle+enter", () => {
   assert.equal(r.state.mode, Mode.WAITING_SETTLE);
   assert.ok(r.actions.includes("WAIT_SETTLE"));
   assert.ok(r.actions.includes("ENTER"));
+  assert.equal(r.actions.filter((action) => action.startsWith("ENTER")).length, 1);
 });
 
 test("PTT then button1 → enter only, no restart", () => {
@@ -23,6 +24,15 @@ test("PTT then button1 → enter only, no restart", () => {
   assert.equal(r.state.mode, Mode.WAITING_SETTLE);
   assert.deepEqual(r.actions, ["WAIT_SETTLE", "ENTER"]);
   assert.ok(!r.actions.includes("TOGGLE_START"));
+  assert.equal(r.actions.filter((action) => action.startsWith("ENTER")).length, 1);
+});
+
+test("repeated stop input cannot queue a second submit while settling", () => {
+  let r = reduce(createMachine(), { type: "BUTTON1_TAP" });
+  r = reduce(r.state, { type: "BUTTON1_TAP" });
+  const again = reduce(r.state, { type: "BUTTON1_TAP" });
+  assert.deepEqual(again.actions, []);
+  assert.equal(r.actions.filter((action) => action.startsWith("ENTER")).length, 1);
 });
 
 test("button1 while idle without pending → start", () => {

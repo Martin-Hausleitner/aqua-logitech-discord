@@ -10,7 +10,7 @@
  *   - Toggle: latched synthetic Fn (fn-down on start, fn-up on stop).
  *     MetaRight/F19 lock taps are unreliable via CGEvent on this Mac; Fn activate is proven.
  *   - PTT: same Fn down/up on button2 press/release (mutually exclusive via state machine)
- *   - Send: Return (vk 36) ONLY after settle heuristic
+ *   - Send: helper-owned PID-targeted Return ONLY after verified AX paste proof
  *
  * G HUB: assign side buttons to "System → Open file / Run" scripts in scripts/ghub/
  *   (or keystroke macros that curl these endpoints). Do NOT bind Enter in G HUB.
@@ -19,21 +19,35 @@
  */
 
 import { createServer } from "node:http";
-import { spawn, execFileSync, execFile } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 import { createMachine, reduce } from "./state-machine.mjs";
-import { snapshotSignals, waitUntilSettled } from "./settle.mjs";
+import { readFreshTranscription, snapshotSignals, waitUntilSettled } from "./settle.mjs";
+import { shouldSubmit } from "./submit-policy.mjs";
+import { createVerifiedPasteGate } from "./verified-paste-gate.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 const HID = join(ROOT, "bin", "hid-tap");
+const VERIFIED_PASTE_GATE = join(ROOT, "bin", "verified-paste-gate");
 const PORT = Number(process.env.AQUA_BRIDGE_PORT ?? 8690);
 const WATCH_PORT = Number(process.env.AQUA_WATCH_PORT ?? 8688);
 const DRY = process.env.AQUA_BRIDGE_DRY === "1";
+// Preview mode preserves Aqua start/stop and settle state while suppressing
+// every synthetic Enter. Existing behavior remains the default.
+const AUTO_SUBMIT = process.env.AQUA_AUTO_SUBMIT !== "0";
+// The helper is created lazily on the first production recording. Preview and
+// dry runs never query AX and never start a native key-emitting process.
+const verifiedPasteGate = !DRY && AUTO_SUBMIT
+  ? createVerifiedPasteGate({
+      binary: VERIFIED_PASTE_GATE,
+      verifyTimeoutMs: Number(process.env.AQUA_PASTE_GATE_TIMEOUT_MS ?? 1500),
+    })
+  : null;
 /** @type {"fn-latch"|"f19"} */
 const TOGGLE_MODE = process.env.AQUA_TOGGLE_MODE === "f19" ? "f19" : "fn-latch";
 
@@ -52,7 +66,7 @@ const KEY_HINT_BIN = join(ROOT, "bin", "aqua-key-hint");
 const keyHint = { running: false, taps: 0, aborts: 0, debounced: 0, lastTapAt: 0, denied: false, pendingFlip: null };
 
 function startKeyHint() {
-  if (!KEY_HINT_ENABLED) return;
+  if (DRY || !KEY_HINT_ENABLED) return;
   if (!existsSync(KEY_HINT_BIN)) {
     log("key-hint binary missing — run swiftc build (see aqua-key-hint.swift)");
     return;
@@ -128,6 +142,7 @@ async function hid(...args) {
 }
 
 function connectWatch() {
+  if (DRY) return;
   const url = `ws://127.0.0.1:${WATCH_PORT}`;
   try {
     // dynamic import of ws if present in mute-sync helper; else raw undici/WebSocket
@@ -158,7 +173,7 @@ function connectWatch() {
   }
 }
 
-const AUTO_ENTER_APPS = (process.env.AQUA_AUTO_ENTER_APPS || "cursor,chatgpt,claude,vesktop,discord,slack,telegram,linear")
+const AUTO_ENTER_APPS = (process.env.AQUA_AUTO_ENTER_APPS || "codex,cursor,chatgpt,claude,vesktop,discord,slack,telegram,linear")
   .split(",")
   .map(s => s.trim().toLowerCase())
   .filter(Boolean);
@@ -179,15 +194,21 @@ const metrics = {
   lastLatencyMs: 0,
   totalLatencyMs: 0,
   avgLatencyMs: 0,
+  enterCount: 0,
+  lastEnterAt: null,
+  lastSettleReason: null,
+  lastStopToEnterMs: null,
+  lastPostSettleToEnterMs: null,
 };
 
 async function getActiveWindow() {
   try {
-    const { stdout: appOut } = await execFileAsync("osascript", ["-e", 'tell application "System Events" to get name of first application process whose frontmost is true']);
+    const { stdout: appOut } = await execFileAsync("osascript", ["-e", 'tell application "System Events" to get name of first application process whose frontmost is true'], { timeout: 1500 });
     const app = appOut.toString().trim();
     let title = "";
     try {
-      const { stdout: titleOut } = await execFileAsync("osascript", ["-e", 'tell application "System Events" to get name of window 1 of (first application process whose frontmost is true)']);
+      if (!BROWSER_APPS.some(browser => app.toLowerCase().includes(browser))) return { app, title };
+      const { stdout: titleOut } = await execFileAsync("osascript", ["-e", 'tell application "System Events" to get name of window 1 of (first application process whose frontmost is true)'], { timeout: 1500 });
       title = titleOut.toString().trim();
     } catch { /* ignore */ }
     return { app, title };
@@ -215,6 +236,10 @@ async function shouldAutoEnter() {
 
 let currentSettleAbort = null;
 let pendingRestart = false;
+let inputGeneration = 0;
+let activeRun = null;
+let shuttingDown = false;
+let shutdownPromise = null;
 
 /** Same physical click as Aqua toggle: Discord mute via aqua-watch, not CoreAudio poll. */
 let hookSeq = 0;
@@ -222,6 +247,10 @@ const SHORTCUT_ENDPOINTS_ENABLED = /^(1|true)$/i.test(process.env.AQUA_SHORTCUT_
 
 function notifySameButton(recording) {
   const rec = !!recording;
+  if (DRY) {
+    log("DRY same-button skipped", `recording=${rec}`);
+    return;
+  }
   if (!watchWs || watchWs.readyState !== 1) {
     log("same-button skipped — aqua-watch not linked", `recording=${rec}`);
     return;
@@ -237,40 +266,106 @@ function notifySameButton(recording) {
   }
 }
 
-function readClipboard() {
+// Capture completion signals before releasing Fn, including deferred PTT submit.
+let transcriptBaseline = null;
+let transcriptStartBaseline = null;
+let stopRequestedAt = null;
+let activePasteGateRun = null;
+let pasteGateSequence = 0;
+let pendingStartCapture = null;
+
+function cancelPasteGateRun(run = activePasteGateRun) {
+  if (!run) return;
+  if (activePasteGateRun === run) activePasteGateRun = null;
+  verifiedPasteGate?.cancel({ token: run.token });
+}
+
+function beginShutdown() {
+  if (shutdownPromise) return shutdownPromise;
+  // Close admission before awaiting the helper. A new event must not be able
+  // to recapture and respawn a helper while the old one is being terminated.
+  shuttingDown = true;
+  inputGeneration++;
+  pendingStartCapture = null;
+  pendingRestart = false;
+  activePasteGateRun = null;
+  currentSettleAbort?.abort();
+  shutdownPromise = (async () => {
+    try { await verifiedPasteGate?.close(); } catch { /* bounded shutdown */ }
+  })();
+  return shutdownPromise;
+}
+
+async function capturePasteFocus(generation) {
+  if (!verifiedPasteGate || !AUTO_SUBMIT || DRY) return null;
+  cancelPasteGateRun();
+  const token = `${process.pid ?? "bridge"}-${generation}-${++pasteGateSequence}`;
+  const run = { token, generation, captured: false, expectedText: null };
+  activePasteGateRun = run;
+  const pending = { run, generation };
+  pendingStartCapture = pending;
+  let result;
   try {
-    return execFileSync("pbpaste", {
-      encoding: "utf8",
-      timeout: 200,
-      maxBuffer: 1024 * 1024,
-    });
+    // This is awaited before the Fn-down that starts Aqua. A failure only
+    // removes the future Enter proof; it must never prevent recording.
+    result = await verifiedPasteGate.capture({ token });
   } catch {
-    return "";
+    result = { ok: false, reason: "helper_unavailable" };
   }
+  if (pendingStartCapture === pending) pendingStartCapture = null;
+  if (generation !== inputGeneration || activePasteGateRun !== run) {
+    verifiedPasteGate?.cancel({ token });
+    return null;
+  }
+  if (!result?.ok) {
+    log(`paste gate capture unavailable (${result?.reason ?? "unknown"}) — recording continues`);
+    cancelPasteGateRun(run);
+    return null;
+  }
+  run.captured = true;
+  return run;
 }
 
 async function runActions(actions) {
+  const generation = inputGeneration;
   let skipEnter = false;
+  let settledAt = null;
+  let expectedTranscript = null;
+  let pasteRun = activePasteGateRun;
   for (const a of actions) {
+    if (generation !== inputGeneration) return;
     switch (a) {
       case "TOGGLE_START":
+        stopRequestedAt = null;
+        transcriptStartBaseline = DRY ? null : snapshotSignals({ includeAudio: false });
+        transcriptBaseline = null;
+        pasteRun = await capturePasteFocus(generation);
+        if (generation !== inputGeneration) return;
         log(a, `mode=${TOGGLE_MODE}`);
         notifySameButton(true);
         if (TOGGLE_MODE === "f19") await hid(process.env.AQUA_LOCK_HID ?? "f19");
         else await hid("fn-down");
         break;
       case "TOGGLE_STOP":
+        stopRequestedAt = Date.now();
+        if (!DRY) transcriptBaseline = snapshotSignals({ includeAudio: false });
         log(a, `mode=${TOGGLE_MODE}`);
         notifySameButton(false);
         if (TOGGLE_MODE === "f19") await hid(process.env.AQUA_LOCK_HID ?? "f19");
         else await hid("fn-up");
         break;
       case "PTT_DOWN":
+        transcriptStartBaseline = DRY ? null : snapshotSignals({ includeAudio: false });
+        transcriptBaseline = null;
+        pasteRun = await capturePasteFocus(generation);
+        if (generation !== inputGeneration) return;
         log(a);
         notifySameButton(true);
         await hid("fn-down");
         break;
       case "PTT_UP":
+        stopRequestedAt = Date.now();
+        if (!DRY) transcriptBaseline = snapshotSignals({ includeAudio: false });
         log(a);
         notifySameButton(false);
         await hid("fn-up");
@@ -281,21 +376,27 @@ async function runActions(actions) {
           log("DRY WAIT_SETTLE — skipping actual wait");
           break;
         }
-        currentSettleAbort = new AbortController();
+        const settleAbort = new AbortController();
+        currentSettleAbort = settleAbort;
         const settle = await waitUntilSettled({
           isRecording: () => aquaRecording,
-          readSignals: () => snapshotSignals(),
-          readClipboard,
-          signal: currentSettleAbort.signal,
-          maxWaitMs: Number(process.env.AQUA_SETTLE_TIMEOUT_MS ?? 6000),
+          readSignals: () => snapshotSignals({ includeAudio: false }),
+          baseline: transcriptBaseline ? { signals: transcriptBaseline } : undefined,
+          signal: settleAbort.signal,
+          maxWaitMs: Number(process.env.AQUA_SETTLE_TIMEOUT_MS ?? 45000),
           pollMs: 15,
           minAfterStopMs: 25,
-          postTranscriptMs: 60,
+          // The native gate proves the actual AX value. This wait is not an
+          // Enter readiness signal and is intentionally zero in production.
+          postTranscriptMs: 0,
           log: (m) => log(m),
         });
-        currentSettleAbort = null;
+        if (currentSettleAbort === settleAbort) currentSettleAbort = null;
+        if (generation !== inputGeneration) return;
 
+        settledAt = Date.now();
         metrics.settleCount++;
+        metrics.lastSettleReason = settle.reason;
         metrics.lastLatencyMs = settle.waitedMs;
         metrics.totalLatencyMs += settle.waitedMs;
         metrics.avgLatencyMs = Math.round(metrics.totalLatencyMs / metrics.settleCount);
@@ -304,6 +405,21 @@ async function runActions(actions) {
           metrics.timeoutCount++;
           log(`settle FAILED (${settle.reason}) — skipping Enter to avoid empty/stuck dispatch`);
           skipEnter = true;
+        } else if (pasteRun?.captured) {
+          const fresh = readFreshTranscription({
+            baseline: transcriptBaseline,
+            recordingBaseline: transcriptStartBaseline,
+          });
+          if (!fresh.ok) {
+            log(`paste gate expected text unavailable (${fresh.reason}) — skipping Enter`);
+            skipEnter = true;
+          } else {
+            expectedTranscript = fresh.text;
+            pasteRun.expectedText = fresh.text;
+          }
+        } else {
+          log("paste gate capture was not proven — skipping Enter");
+          skipEnter = true;
         }
         break;
       }
@@ -311,8 +427,15 @@ async function runActions(actions) {
       case "ENTER_FORCE":
       case "ENTER_NONE": {
         log(a);
+        if (!shouldSubmit(a, AUTO_SUBMIT)) {
+          log(`Preview mode — suppressing synthetic ${a}`);
+          cancelPasteGateRun(pasteRun);
+          machine = reduce(machine, { type: "SETTLE_DONE" }).state;
+          break;
+        }
         if (skipEnter) {
           log(`Skipping ${a} because settle did not complete successfully`);
+          cancelPasteGateRun(pasteRun);
           machine = reduce(machine, { type: "SETTLE_DONE" }).state;
           break;
         }
@@ -329,8 +452,40 @@ async function runActions(actions) {
           doEnter = smartEnter;
           log(`Smart Submit: Active=${app} (Title=${title}) -> Auto-Enter=${doEnter}`);
         }
+        if (generation !== inputGeneration) return;
         if (doEnter) {
-          await hid("enter");
+          if (!pasteRun?.captured || typeof expectedTranscript !== "string") {
+            log("paste gate proof missing — suppressing Enter");
+            cancelPasteGateRun(pasteRun);
+          } else {
+            let gateResult;
+            try {
+              // The helper revalidates app, window, focused element and value
+              // immediately before emitting Enter in that same process.
+              gateResult = await verifiedPasteGate.verifyAndEnter({
+                token: pasteRun.token,
+                expectedText: expectedTranscript,
+              });
+            } catch {
+              gateResult = { ok: false, reason: "helper_unavailable" };
+            }
+            if (generation !== inputGeneration) return;
+            if (!gateResult?.ok) {
+              log(`paste gate rejected (${gateResult?.reason ?? "unknown"}) — suppressing Enter`);
+              cancelPasteGateRun(pasteRun);
+            } else {
+              if (activePasteGateRun === pasteRun) activePasteGateRun = null;
+              if (!DRY) {
+                metrics.enterCount++;
+                metrics.lastEnterAt = Date.now();
+                metrics.lastStopToEnterMs = stopRequestedAt == null ? null : metrics.lastEnterAt - stopRequestedAt;
+                metrics.lastPostSettleToEnterMs = settledAt == null ? null : metrics.lastEnterAt - settledAt;
+                log("Enter key emitted by verified paste gate");
+              }
+            }
+          }
+        } else {
+          cancelPasteGateRun(pasteRun);
         }
         machine = reduce(machine, { type: "SETTLE_DONE" }).state;
         break;
@@ -342,10 +497,15 @@ async function runActions(actions) {
 }
 
 async function handleEvent(type) {
+  if (shuttingDown) return { ok: false, reason: "shutting_down", state: machine, actions: [] };
   if (type === "BUTTON1_TAP" || type.startsWith("SHORTCUT")) metrics.totalToggles++;
   if (type.startsWith("BUTTON2")) metrics.totalPtt++;
 
   if (type === "CANCEL") {
+    inputGeneration++;
+    pendingStartCapture = null;
+    cancelPasteGateRun();
+    activeRun = null;
     pendingRestart = false;
     if (currentSettleAbort) {
       currentSettleAbort.abort();
@@ -354,8 +514,23 @@ async function handleEvent(type) {
     busy = false;
   }
 
+  // A stop/release arriving while the native capture is still pending means
+  // the Fn-down has not happened yet. Invalidate that start and reset the
+  // machine without manufacturing a stop/settle cycle for a recording that
+  // never began.
+  if (pendingStartCapture && (type === "BUTTON1_TAP" || type.startsWith("SHORTCUT") || type === "BUTTON2_UP")) {
+    inputGeneration++;
+    pendingStartCapture = null;
+    cancelPasteGateRun();
+    machine = reduce(machine, { type: "CANCEL" }).state;
+    return { ok: true, reason: "capture_cancelled", state: machine, actions: [] };
+  }
+
   if (busy && (type === "BUTTON1_TAP" || type.startsWith("SHORTCUT"))) {
-    // Fast second press: abort 6s settle and queue a fresh toggle instead of wrap.
+    // Fast second press: abort pending settle and queue a fresh toggle instead of wrap.
+    inputGeneration++;
+    pendingStartCapture = null;
+    cancelPasteGateRun();
     pendingRestart = true;
     if (currentSettleAbort) currentSettleAbort.abort();
     log("busy — abort settle, queue restart", type);
@@ -375,13 +550,21 @@ async function handleEvent(type) {
 
   const needsWait = actions.includes("WAIT_SETTLE") || actions.includes("ENTER") || actions.includes("ENTER_FORCE") || actions.includes("ENTER_NONE");
   if (needsWait) {
+    const owner = {};
+    activeRun = owner;
+    let ownsRun = false;
     busy = true;
     try {
       await runActions(actions);
     } finally {
-      busy = false;
-      currentSettleAbort = null;
+      ownsRun = activeRun === owner;
+      if (ownsRun) {
+        busy = false;
+        currentSettleAbort = null;
+        activeRun = null;
+      }
     }
+    if (!ownsRun) return { ok: true, reason: "superseded", state: machine };
     if (pendingRestart) {
       pendingRestart = false;
       machine = reduce(machine, { type: "SETTLE_DONE" }).state;
@@ -397,6 +580,22 @@ async function handleEvent(type) {
 function json(res, code, body) {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
+}
+
+function validLoopbackHost(host) {
+  return host === `127.0.0.1:${PORT}` || host === `localhost:${PORT}`;
+}
+
+function rejectBrowserControl(req, res) {
+  if (!validLoopbackHost(req.headers.host ?? "")) {
+    json(res, 403, { ok: false, error: "host must be loopback with the configured port" });
+    return true;
+  }
+  if (Object.hasOwn(req.headers, "origin") || Object.hasOwn(req.headers, "sec-fetch-site")) {
+    json(res, 403, { ok: false, error: "browser-originated control requests are disabled" });
+    return true;
+  }
+  return false;
 }
 
 const server = createServer(async (req, res) => {
@@ -415,25 +614,30 @@ const server = createServer(async (req, res) => {
       },
       config: {
         toggleMode: TOGGLE_MODE,
+        autoSubmit: AUTO_SUBMIT,
         autoEnterApps: AUTO_ENTER_APPS,
         autoEnterTitles: AUTO_ENTER_TITLES,
       },
     });
   }
-  if (req.method === "POST" || req.method === "GET") {
-    const map = {
+  const map = {
       "/button1": "BUTTON1_TAP",
       "/button2/down": "BUTTON2_DOWN",
       "/button2/up": "BUTTON2_UP",
       "/shortcut/left": "SHORTCUT_LEFT",
       "/shortcut/right": "SHORTCUT_RIGHT",
       "/cancel": "CANCEL",
-    };
- const ev = map[url.pathname];
+  };
+  const ev = map[url.pathname];
+  if (ev) {
+    if (req.method !== "POST") {
+      res.setHeader("Allow", "POST");
+      return json(res, 405, { ok: false, error: "control routes require POST" });
+    }
+    if (rejectBrowserControl(req, res)) return;
   if (ev && ev.startsWith("SHORTCUT") && !SHORTCUT_ENDPOINTS_ENABLED) {
     return json(res, 410, { ok: false, error: "shortcut endpoints disabled; use /button1" });
   }
-    if (ev) {
       try {
         const out = await handleEvent(ev);
         return json(res, 200, out);
@@ -441,7 +645,6 @@ const server = createServer(async (req, res) => {
         log("error", e);
         return json(res, 500, { ok: false, error: String(e.message ?? e) });
       }
-    }
   }
   json(res, 404, { error: "not found" });
 });
@@ -454,8 +657,10 @@ server.listen(PORT, "127.0.0.1", () => {
 });
 
 for (const sig of ["SIGINT", "SIGTERM"]) {
-  process.on(sig, () => {
-    try { hid("fn-up"); } catch { /* */ }
+  process.on(sig, async () => {
+    if (shuttingDown && !shutdownPromise) return;
+    await beginShutdown();
+    try { await hid("fn-up"); } catch { /* */ }
     process.exit(0);
   });
 }
