@@ -1,18 +1,14 @@
 export const STATUS_PROTOCOL_VERSION = 1;
 /** Ignore CoreAudio/poll that disagrees with a recent button-bridge command. */
-export const BRIDGE_LATCH_MS = 750;
+export const BRIDGE_LATCH_MS = 300;
 /** Observe-only: a bridge/control command with no CoreAudio echo by this
- *  deadline is COUNTED and logged, never auto-reverted. Live evidence
- *  2026-09-01 (~01:50): Aqua's key->CoreAudio echo streut 0.4s bis >4s
- *  (Mic-Nachlauf beim Verarbeiten) — ein aktiver Rollback drehte echte
- *  Diktate um (seq 53/59). Heilung: Kombi-Abort an der Quelle + CoreAudio-
- *  Korrektur nach dem Latch + der Nutzer-Tap selbst. */
-export const CONFIRM_DEADLINE_MS = 2500;
+ *  deadline is COUNTED and logged, never auto-reverted. */
+export const CONFIRM_DEADLINE_MS = 1000;
 /** Inversion detection: adopt the microphone truth when it disagrees with the
  *  held state for INVERSION_CONFIRM_MS, but never within INVERSION_GRACE_MS
  *  of the last bridge command (Aqua may still be catching up). */
-export const INVERSION_GRACE_MS = 2500;
-export const INVERSION_CONFIRM_MS = 1000;
+export const INVERSION_GRACE_MS = 500;
+export const INVERSION_CONFIRM_MS = 250;
 
 const DEFAULT_APPS = ["discord"];
 const COMMAND_SOURCES = new Set(["bridge", "control"]);

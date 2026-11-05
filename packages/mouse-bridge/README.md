@@ -4,19 +4,29 @@
 
 | Button | Role | Behaviour |
 |--------|------|-----------|
-| **1** (front/forward side, G4) | Toggle + send | Click starts Aqua via **latched Fn** (`fn-down`); click again releases Fn, **waits until transcription/paste settles**, then presses **Enter**. After PTT, a short tap only sends Enter (does not restart Aqua). |
-| **2** (back side, G5) | Push-to-Talk | Press = Fn down; release = Fn up. **No Enter.** Prefer Karabiner `button5→Fn` for physical press/release (G HUB cannot). |
+| **Front side, G5** | Toggle + send | Click starts Aqua via **latched Fn**; click again stops it, verifies the exact paste in the original input field and then sends **Enter**. `AquaSend.app` → `POST /button/front`. |
+| **Back side, G4** | Toggle + text only | Click starts Aqua; click again stops it and lets Aqua insert text at the cursor. **No Enter.** `AquaDictate.app` → `POST /button/back`. |
+
+Both buttons use the same recording state; the button used to stop decides
+whether to send. Back can therefore stop a front-started dictation without
+sending it. Front requests Enter in the original app only after the native
+paste proof. `AQUA_AUTO_SUBMIT=0` still suppresses every Return. Legacy
+`/button1` retains its app allowlist; `/button2/down|up` remains an API-only PTT
+compatibility route, not the current physical side-button assignment.
 
 ## Why not G HUB Enter macros?
 
-G HUB currently has a macro `cm enter` (Cmd+Enter) on `prox2wirelessmouse_g4_m1`. That fires Enter immediately on stop — while Aqua is still transcribing — so Discord often sends an empty/partial message. **Remove that assignment** and route through this bridge.
+An older G HUB `cm enter` macro sent Cmd+Enter immediately on stop while Aqua
+was still transcribing. The current two app assignments route through this
+bridge instead and never use a fixed-delay Enter macro.
 
 ## Architecture
 
 ```
 G HUB side button → scripts/ghub/*.sh (curl) / AquaButton1.app
        → mouse-bridge :8690 (state machine)
-            ├─ hid-tap  Fn latch / Fn PTT / Enter   (CGEvent HID tap)
+            ├─ hid-tap  Fn latch / Fn PTT            (CGEvent HID tap)
+            ├─ verified-paste-gate                  (native AX proof + PID-targeted Enter)
             └─ aqua-watch :8688                 (recording settle signal)
 Aqua Voice → Discord (paste) → Enter (after settle)
 Discord mute ← Vencord AquaMuteSync ← aqua-watch
@@ -36,15 +46,58 @@ cd packages/mouse-bridge
 ./scripts/install-copy-enter.sh
 ```
 
-## Settle heuristic (honest)
+## Verified Enter gate
 
-Not an Aqua public API. Enter waits in `src/settle.mjs` for a **transcript** signal:
+The bridge does not treat a timestamp or an elapsed delay as proof that a paste
+landed. On a production run, `verified-paste-gate` is a persistent native Swift
+helper for that run:
 
-1. `aqua-watch` recording true→false (must stop first)
-2. **New `history.json` transcription timestamp** (primary — paste/persist done)
-3. or `history.json` mtime advance / clipboard change
-4. short `postTranscriptMs` delay so text can land in the focused field
-5. **No early quiet/wav Enter** — WAV means “file written”, not “transcription finished”. On timeout, Enter is skipped (avoids empty Discord sends).
+1. Before Fn-down, it captures the front PID, AX window, focused editable
+   element, UTF-16 selection, and value. Plaintext stays in helper memory.
+2. After recording stops, Aqua history must contain exactly one fresh,
+   schema-known transcription with integer `sessionId` and string `content`.
+   Both the legacy root `history.json` and Aqua 0.21's
+   `accounts/<account>/history.json` (`items`/`syncCursor`) are supported.
+   Discovery requires exactly one history source; account/source changes fail
+   closed. Freshness uses session IDs against recording and stop baselines,
+   so a full 100-item retained history can rotate without increasing its count.
+   `rawText`, unknown schemas, equal-timestamp ties, and ambiguous concurrent
+   history updates fail closed.
+3. The helper polls for the exact expected insertion/replacement in the same
+   value, revalidates permission, PID, window, focused element, selection, and
+   value immediately before posting. It prepares Enter with cleared modifier
+   flags and posts both events to the captured PID; Node has no Enter fallback.
+4. A missing AX/text/selection proof, focus/app change, helper failure, or the
+   45-second settle timeout suppresses Enter while recording controls continue.
+
+The hot poll reads cached history metadata, skips audio-directory scans, and does not spawn `pbpaste`. `config.autoSubmit` must be `true`; `AQUA_AUTO_SUBMIT=0` suppresses every Enter. Codex is included in the legacy automatic target list. Configure `AQUA_AUTO_ENTER_APPS` for legacy `/button1`; explicit front/back routes select send/text-only directly. `/status` exposes `history.valid` and `history.schemaKnown` without transcript text or account paths. `frontTaps`/`backTaps` count received route requests; `enterCount` means the helper posted Enter after proof, never that the destination accepted or submitted the message.
+
+## Current Mac route (2026-11-05)
+
+G HUB was absent and its updater service disabled. The official notarized
+Logitech installer restored G HUB 2026.7.992920; the exact disabled updater
+service was re-enabled. The existing settings database was privately backed up
+before installation and again before remapping. The active Desktop: Default
+profile now binds **G5/front → AquaSend** and **G4/back → AquaDictate**. Both
+launchers are background apps (`LSUIElement=true`) and post only their dedicated
+loopback endpoint. OpenLogi's Back/Forward mappings for this mouse were removed
+after a private backup to prevent competing dispatch. Other device settings
+and assignments are preserved. No second input daemon was added.
+
+The existing bridge LaunchAgent enables automatic Enter. Its Codex/ChatGPT
+app and Codex title lists govern only the legacy `/button1` automatic policy;
+the explicit front button requests send and the back button forbids it.
+Restart the existing bridge only
+while it is idle and Aqua reports no recording; preserve that LaunchAgent's
+environment rather than replacing it with installer defaults.
+
+The implementation plan and acceptance checklist are in
+[`aqua-current-history-g4-submit`](../../openspec/changes/aqua-current-history-g4-submit/).
+Physical acceptance requires observed inputs from each button, real Aqua text
+in a harmless test field, exactly one independently observed Return after the
+front-button stop and no Return after the back-button stop. The old
+`scripts/e2e-aqua-mouse.sh` modifies real history metadata and is not valid
+acceptance evidence for the current native paste gate.
 
 **Proven on this Mac (2026-07-24):** latched-Fn Button1 toggle → `recording:true/false`; settle must use `history_ts` (quiet/wav was the Enter-too-early bug). PTT API path; PTT then Button1 = Enter only. **Not proven:** physical G4/G5; Discord mute while plugin `online=false`.
 
@@ -53,6 +106,7 @@ Not an Aqua public API. Enter waits in `src/settle.mjs` for a **transcript** sig
 ```bash
 cd packages/mouse-bridge
 ./scripts/build-hid.sh
+./scripts/build-verified-paste-gate.sh
 ./scripts/install-bridge.sh   # LaunchAgent org.aqua.mouse-bridge
 npm test
 # repo root:
@@ -60,11 +114,11 @@ bash scripts/e2e-aqua-mouse.sh --dry-run
 bash scripts/e2e-aqua-mouse.sh
 ```
 
-### G HUB (manual — required)
+### G HUB assignments
 
 1. Open Logitech G HUB → Pro X 2 Wireless → Assignments.
-2. **G4 (forward):** Launch Application → `apps/AquaButton1.app`.
-3. **G5 (back):** use Karabiner — `karabiner/README.md` (not G HUB press/release apps).
+2. **G5 (front):** Launch Application → `apps/AquaSend.app`.
+3. **G4 (back):** Launch Application → `apps/AquaDictate.app`.
 4. Do **not** bind Enter/Return in G HUB for these buttons.
 
 ### Permissions
