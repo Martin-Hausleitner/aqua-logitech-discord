@@ -1,12 +1,16 @@
 /**
  * Logitech side-button state machine for Aqua Voice.
  *
- * Button 1 (forward / G4 preferred): toggle Aqua lock (MetaRight).
+ * Front button: shared Aqua toggle, always send after proven paste on stop.
+ * Back button: shared Aqua toggle, never send on stop.
+ * The button used to stop chooses the send policy, even across button starts.
+ *
+ * Legacy Button 1: toggle Aqua lock (MetaRight).
  *   - If idle → start recording (toggle on)
  *   - If recording (toggle mode) → stop, wait for transcript settle, then Enter
  *   - If idle but pendingEnterAfterPtt → wait settle + Enter (do NOT restart Aqua)
  *
- * Button 2 (back / G5 preferred): Push-to-Talk via synthetic Fn hold.
+ * Legacy Button 2 API: Push-to-Talk via synthetic Fn hold.
  *   - press → Fn down (activate); release → Fn up; never Enter
  *   - after PTT release, arm pendingEnterAfterPtt so a short Button1 tap sends Enter
  */
@@ -39,11 +43,13 @@ export function reduce(state, event) {
 
   switch (event.type) {
     case "BUTTON1_TAP":
+    case "BUTTON_SEND_TAP":
+    case "BUTTON_DICTATE_TAP":
     case "SHORTCUT_LEFT":
     case "SHORTCUT_RIGHT": {
       let enterStr = "ENTER";
-      if (event.type === "SHORTCUT_LEFT") enterStr = "ENTER_NONE";
-      if (event.type === "SHORTCUT_RIGHT") enterStr = "ENTER_FORCE";
+      if (event.type === "SHORTCUT_LEFT" || event.type === "BUTTON_DICTATE_TAP") enterStr = "ENTER_NONE";
+      if (event.type === "SHORTCUT_RIGHT" || event.type === "BUTTON_SEND_TAP") enterStr = "ENTER_FORCE";
 
       if (next.mode === Mode.PTT_HOLDING) {
         // Ignore toggle while PTT is physically held

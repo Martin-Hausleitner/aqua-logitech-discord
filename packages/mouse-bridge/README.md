@@ -1,66 +1,156 @@
-# Mouse Bridge (Logitech G Pro → Aqua → Enter)
+# Aqua mouse bridge
 
-## Goal
+Direct macOS side-button input for Aqua Voice. The existing Node bridge owns one
+small Swift event-tap child; G HUB does not need to run.
 
-| Button | Role | Behaviour |
-|--------|------|-----------|
-| **1** (front/forward side, G4) | Toggle + send | Click starts Aqua via **latched Fn** (`fn-down`); click again releases Fn, **waits until transcription/paste settles**, then presses **Enter**. After PTT, a short tap only sends Enter (does not restart Aqua). |
-| **2** (back side, G5) | Push-to-Talk | Press = Fn down; release = Fn up. **No Enter.** Prefer Karabiner `button5→Fn` for physical press/release (G HUB cannot). |
+| Physical button | Action |
+| --- | --- |
+| Front / G5 | Click to start, click to stop; send Return only after the completed transcript is proven in the original field. |
+| Back / G4 | Click to start, click to stop; insert text without Return. |
 
-## Why not G HUB Enter macros?
+The button used to **stop** selects the action. A back-button stop also prevents
+Return after a front-button start. Aqua inserts at the cursor itself; no manual
+paste is needed. `AQUA_AUTO_SUBMIT=0` suppresses every automatic Return.
 
-G HUB currently has a macro `cm enter` (Cmd+Enter) on `prox2wirelessmouse_g4_m1`. That fires Enter immediately on stop — while Aqua is still transcribing — so Discord often sends an empty/partial message. **Remove that assignment** and route through this bridge.
+## Install
 
-## Architecture
+Requirements: macOS, Aqua Voice configured to activate with Fn, Node.js 22 or
+newer, and the Xcode Command Line Tools (`swiftc`). The Node/Swift runtime uses
+no third-party packages.
 
-```
-G HUB side button → scripts/ghub/*.sh (curl) / AquaButton1.app
-       → mouse-bridge :8690 (state machine)
-            ├─ hid-tap  Fn latch / Fn PTT / Enter   (CGEvent HID tap)
-            └─ aqua-watch :8688                 (recording settle signal)
-Aqua Voice → Discord (paste) → Enter (after settle)
-Discord mute ← Vencord AquaMuteSync ← aqua-watch
-```
+From the repository root:
 
-## Settle heuristic (honest)
-
-Not an Aqua public API. Enter waits in `src/settle.mjs` for a **transcript** signal:
-
-1. `aqua-watch` recording true→false (must stop first)
-2. **New `history.json` transcription timestamp** (primary — paste/persist done)
-3. or `history.json` mtime advance / clipboard change
-4. short `postTranscriptMs` delay so text can land in the focused field
-5. **No early quiet/wav Enter** — WAV means “file written”, not “transcription finished”. On timeout, Enter is skipped (avoids empty Discord sends).
-
-**Proven on this Mac (2026-07-24):** latched-Fn Button1 toggle → `recording:true/false`; settle must use `history_ts` (quiet/wav was the Enter-too-early bug). PTT API path; PTT then Button1 = Enter only. **Not proven:** physical G4/G5; Discord mute while plugin `online=false`.
-
-## Setup
-
-```bash
+```sh
 cd packages/mouse-bridge
-./scripts/build-hid.sh
-./scripts/install-bridge.sh   # LaunchAgent org.aqua.mouse-bridge
+./scripts/install-bridge.sh --native
+```
+
+The installer builds the helpers and configures the existing
+`org.aqua.mouse-bridge` LaunchAgent. It does not create another input service.
+Grant the normal macOS **Accessibility** permission requested for the bridge
+and its native helpers. Missing permission is reported as `nativeMouse.denied`;
+the code does not change system privacy settings.
+
+Quit G HUB and disable overlapping side-button mappings in other mouse tools
+before enabling native input. Do not also assign these buttons directly as
+Aqua mouse hotkeys. Active mode consumes only standard side-button
+edges; left, right and middle clicks pass through. The public event API does
+not reliably identify a physical device, so the mapping applies to standard
+side buttons from connected mice, not a serial-number-filtered device.
+
+For observation without controlling Aqua or consuming clicks:
+
+```sh
+./scripts/install-bridge.sh --observe
+```
+
+Without either option, installation preserves the legacy HTTP-input mode and
+leaves the native hook disabled. The existing HTTP front/back routes remain
+available for a single alternative dispatcher:
+
+```sh
+curl --fail -X POST http://127.0.0.1:8690/button/front
+curl --fail -X POST http://127.0.0.1:8690/button/back
+```
+
+Choose one physical dispatcher. Running a second mapper can cause duplicate
+actions even when its assignment looks equivalent.
+
+## How Return is verified
+
+1. Before Fn-down, a persistent native helper captures the front process,
+   window, editable field, value and UTF-16 selection. It uses the application
+   accessibility interface; field text stays in helper memory.
+2. After recording stops, the history reader requires exactly one new,
+   nonempty transcription relative to both recording and stop baselines. It
+   supports legacy `historyByUserId` and current `accounts/*/history.json`
+   files with `{items, syncCursor}`. A full retained history may remain the same
+   size; freshness is determined by session identity.
+3. The helper waits for the exact expected insertion or selection replacement,
+   with a collapsed cursor exactly at the insertion boundary, then revalidates
+   process, window, focused field, value and cursor immediately before
+   posting Return to the captured process. Electron accessibility is enabled
+   through its normal `AXManualAccessibility` interface when needed.
+
+A delay, history timestamp, healthy endpoint or returned action name alone
+never authorizes Return. Missing/ambiguous histories, account/source changes,
+focus changes, helper failure and transcription timeout suppress Return.
+Recording controls remain available when an editable-field proof is missing.
+No clipboard content is polled by this path.
+
+History and native input are read locally. Transcription content is passed only
+in memory to the proof helper and is not included in the status response.
+
+The already-running native mouse child also owns an acknowledged Fn-only
+command channel. Normal clicks no longer start a HID process. A failed command
+cannot silently switch to a second writer. Recovery releases a possibly held
+Fn before a replacement child becomes ready. The paste helper is prewarmed
+without reading any field until recording starts. Aqua's own recognition time
+is separate from input-control and paste-proof timing.
+
+## Audit and optional automatic repair
+
+Every production run writes bounded, private metadata to
+`~/Library/Logs/aqua-mouse-audit.jsonl` (0600; 2 MiB plus three rotated files).
+It records route, opaque run ID, fixed result codes and phase duration. It
+never records dictated text, clipboard content, window titles or audio.
+`enter_emitted` means **posted**, with delivery explicitly **not proven**.
+
+Automatic repair is off by default. To opt in with an existing authenticated
+Codex CLI, install with:
+
+```sh
+AQUA_REPAIR_ENABLED=1 AQUA_REPAIR_CODEX_BIN="$(command -v codex)" ./scripts/install-bridge.sh --native
+```
+
+Unexpected repeated failures can start one bounded Codex repair job. A local
+`POST /repair/notify` webhook accepts only an opaque `id`, a recognized `reason`
+and `route` (`front`, `back`, `legacy`). It rejects browser-originated requests,
+arbitrary prompts and bodies over 1 KiB. Three qualifying failures within five
+minutes trigger a job; terminal native-control faults qualify immediately.
+Attempts are limited to one per 30 minutes and deduplicated across bridge
+restarts. Ordinary focus changes and noneditable fields do not trigger repair.
+
+A short-lived detached Node runner owns the job so a bridge restart cannot
+kill its own repair. Durable ownership prevents a second repair writer.
+Private state and reports live under
+`~/Library/Application Support/Aqua Mouse Repair/`. A maintenance file at
+`~/Library/Application Support/Aqua Mouse Bridge/maintenance.json` blocks
+repairs while a manual owner works. Before runtime changes the repair job must
+check bridge idle, no pending proof/recovery, and fresh nondegraded CoreAudio
+idle. It cannot publish code, change system permissions or start audio tests.
+
+After a crash with uncertain child liveness, ownership stays blocked for
+explicit diagnosis; a timer never assumes the previous writer disappeared.
+Queue acceptance, a started chat, a completed Codex turn and a working fix are
+separate evidence. No automatic Return retry is used to hide a failure.
+
+## Status and verification
+
+```sh
+curl --fail http://127.0.0.1:8690/status
 npm test
-# repo root:
-bash scripts/e2e-aqua-mouse.sh --dry-run
-bash scripts/e2e-aqua-mouse.sh
+npm run build:verified-paste-gate
+npm run build:native-mouse-input
 ```
 
-### G HUB (manual — required)
+`nativeMouse.ready` describes the input child; `history.valid` and
+`history.schemaKnown` describe the selected history source. `metrics` includes
+received-input counts and control timing. `enterCount` means the helper posted
+Return after proof; the receiving application's submission remains a separate
+observation.
 
-1. Open Logitech G HUB → Pro X 2 Wireless → Assignments.
-2. **G4 (forward):** Launch Application → `apps/AquaButton1.app`.
-3. **G5 (back):** use Karabiner — `karabiner/README.md` (not G HUB press/release apps).
-4. Do **not** bind Enter/Return in G HUB for these buttons.
+The automated tests exercise state transitions, retained-history rollover,
+source binding, helper failure/cancellation, protocol validation and child
+lifecycle with isolated synthetic fixtures. They do not establish physical
+mouse behavior or live speech recognition. **Physical front/back testing with
+real Aqua transcription and independent Return receipt is still pending.**
+Use a harmless local input field with a Return counter: front stop must produce
+exactly one Return; back stop must produce none; changing focus must suppress
+Return. A missing proof must stay visibly incomplete.
 
-### Permissions
-
-- **Accessibility** for the process posting HID events (`node` running the bridge, or `hid-tap`).
-- Input Monitoring if macOS prompts for it.
-
-## Dry run
-
-```bash
-AQUA_BRIDGE_DRY=1 node src/mouse-bridge.mjs
-curl -X POST http://127.0.0.1:8690/button1
-```
+The native hook is a child of the bridge and is stopped during bridge shutdown.
+It does not synthesize side-button events and does not claim that event source
+metadata proves physical origin. Repeated downs are tracked without a time-based
+debounce, and helper failure recovery is bounded. Existing
+Discord mute integration is independent and requires its own verification.

@@ -1,5 +1,25 @@
 # 🎙️ aqua-logitech-discord
 
+## Native Seitentasten ohne G HUB
+
+Vorne **G5** startet und stoppt Aqua mit automatischem Return nach geprüftem
+Einfügen; hinten **G4** startet und stoppt ohne Return. Die vorhandene Bridge
+verwaltet den nativen Maushook selbst. Node.js 22+, Swift und die reguläre
+macOS-Bedienungshilfenfreigabe sind erforderlich.
+
+```sh
+cd packages/mouse-bridge
+./scripts/install-bridge.sh --native
+```
+
+G HUB beenden und konkurrierende Seitentastenbelegungen deaktivieren.
+[Einrichtung, Funktionsweise und Prüfgrenzen](packages/mouse-bridge/README.md).
+Die physische Prüfung mit echter Aqua-Transkription und unabhängig beobachtetem
+Return ist noch offen. Die folgenden Abschnitte beschreiben die bestehende
+Discord-Mute-Integration.
+
+---
+
 **Aqua Voice ⇄ Discord Mute-Sync in Millisekunden** — Tastatur-Hook, CoreAudio-Wahrheit, Vencord-Plugin und eine fail-closed Messpipeline in einem Repo.
 
 ![Tests](https://img.shields.io/badge/tests-164%20passing-brightgreen) ![Latenz](https://img.shields.io/badge/Taste→Mute-6–43%20ms-blue) ![Spec](https://img.shields.io/badge/OpenSpec-strict%20✓-8A2BE2) ![Platform](https://img.shields.io/badge/macOS-Apple%20Silicon-lightgrey)

@@ -10,6 +10,7 @@ test("button1 toggle start then stop → settle+enter", () => {
   assert.equal(r.state.mode, Mode.WAITING_SETTLE);
   assert.ok(r.actions.includes("WAIT_SETTLE"));
   assert.ok(r.actions.includes("ENTER"));
+  assert.equal(r.actions.filter((action) => action.startsWith("ENTER")).length, 1);
 });
 
 test("PTT then button1 → enter only, no restart", () => {
@@ -23,6 +24,15 @@ test("PTT then button1 → enter only, no restart", () => {
   assert.equal(r.state.mode, Mode.WAITING_SETTLE);
   assert.deepEqual(r.actions, ["WAIT_SETTLE", "ENTER"]);
   assert.ok(!r.actions.includes("TOGGLE_START"));
+  assert.equal(r.actions.filter((action) => action.startsWith("ENTER")).length, 1);
+});
+
+test("repeated stop input cannot queue a second submit while settling", () => {
+  let r = reduce(createMachine(), { type: "BUTTON1_TAP" });
+  r = reduce(r.state, { type: "BUTTON1_TAP" });
+  const again = reduce(r.state, { type: "BUTTON1_TAP" });
+  assert.deepEqual(again.actions, []);
+  assert.equal(r.actions.filter((action) => action.startsWith("ENTER")).length, 1);
 });
 
 test("button1 while idle without pending → start", () => {
@@ -63,4 +73,38 @@ test("CANCEL resets machine to IDLE and clears pending PTT state", () => {
   assert.equal(r.state.mode, Mode.IDLE);
   assert.equal(r.state.pendingEnterAfterPtt, false);
   assert.deepEqual(r.actions, ["PTT_UP"]);
+});
+
+test("front and back share a toggle; the stop button alone chooses Enter policy", () => {
+  for (const start of ["BUTTON_SEND_TAP", "BUTTON_DICTATE_TAP", "BUTTON1_TAP"]) {
+    for (const [stop, enterAction] of [["BUTTON_SEND_TAP", "ENTER_FORCE"], ["BUTTON_DICTATE_TAP", "ENTER_NONE"]]) {
+      const started = reduce(createMachine(), { type: start });
+      assert.deepEqual(started.actions, ["TOGGLE_START"], start);
+      const stopped = reduce(started.state, { type: stop });
+      assert.equal(stopped.state.mode, Mode.WAITING_SETTLE);
+      assert.deepEqual(stopped.actions, ["TOGGLE_STOP", "WAIT_SETTLE", enterAction], `${start} then ${stop}`);
+      assert.equal(stopped.state.pendingEnterAfterPtt, false);
+    }
+  }
+});
+
+test("back clears deferred PTT send without restarting or requesting Enter", () => {
+  let r = reduce(createMachine(), { type: "BUTTON2_DOWN" });
+  r = reduce(r.state, { type: "BUTTON2_UP" });
+  r = reduce(r.state, { type: "BUTTON_DICTATE_TAP" });
+  assert.deepEqual(r.actions, ["WAIT_SETTLE", "ENTER_NONE"]);
+  assert.equal(r.state.pendingEnterAfterPtt, false);
+});
+
+test("front can submit a deferred PTT paste while either toggle is ignored during hold", () => {
+  for (const button of ["BUTTON_SEND_TAP", "BUTTON_DICTATE_TAP"]) {
+    const held = reduce(createMachine(), { type: "BUTTON2_DOWN" });
+    const tap = reduce(held.state, { type: button });
+    assert.equal(tap.state.mode, Mode.PTT_HOLDING);
+    assert.deepEqual(tap.actions, []);
+  }
+  let r = reduce(createMachine(), { type: "BUTTON2_DOWN" });
+  r = reduce(r.state, { type: "BUTTON2_UP" });
+  r = reduce(r.state, { type: "BUTTON_SEND_TAP" });
+  assert.deepEqual(r.actions, ["WAIT_SETTLE", "ENTER_FORCE"]);
 });
