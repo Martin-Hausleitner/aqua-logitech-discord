@@ -109,6 +109,31 @@ Fn before a replacement child becomes ready. The paste helper is prewarmed
 without reading any field until recording starts. Aqua's own recognition time
 is separate from input-control and paste-proof timing.
 
+## Local live test window
+
+```sh
+npm run monitor
+```
+
+Open `/test.html` on the loopback port reported by the command. This temporary
+monitor observes the existing bridge and watcher; it never sends recording or
+keyboard commands. It shows the native hook, Fn acknowledgement, CoreAudio
+confirmation and independent Enter-down/up receipt in local test fields.
+Status refreshes every 250 ms with a bounded shared upstream cache.
+
+The recording request is displayed separately from confirmed CoreAudio
+activity. A command-to-confirmation time is measured only for a new live intent
+and its first matching confirmation on the same watcher connection. Initial,
+reconnected, stale, ambiguous or degraded pairs remain unknown. CoreAudio
+activity does not establish when usable samples began or whether the first
+spoken words were retained. Stop timings are not labeled as start timings.
+
+The monitor binds only to `127.0.0.1`, serves one fixed page and a read-only
+metadata endpoint, and forwards only explicitly allowed fields. It has no
+control route, transcript export or directory listing. Local test-text stays
+in the page; optional measurement export omits it. Stop the temporary monitor
+after testing.
+
 ## Audit and optional automatic repair
 
 Every production run writes bounded, private metadata to

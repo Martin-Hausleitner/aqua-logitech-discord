@@ -12,10 +12,11 @@
 - [x] Add explicit short follow-up Return on both buttons without a recording restart or repeat timer.
 - [x] Revalidate manual destinations and coordinate manual requests with automatic Return.
 - [x] Check recognized nearby send controls before automatic Return.
+- [x] Add a read-only local live window with separate control, CoreAudio and independent Return receipt evidence.
 
 ## 2. Validate
 
-- [x] Run the isolated package regression suite in the publication candidate (211 tests passed, including short follow-ups and manual destination proof).
+- [x] Run the isolated package regression suite in the publication candidate (222 tests passed, including short follow-ups, manual destination proof and the read-only live monitor).
 - [x] Compile the native input, HID and paste helpers without starting them.
 - [x] Run strict OpenSpec validation and publication diff/privacy checks.
 - [x] Independently review input ownership, shutdown, proof timing, audit and repair concurrency.

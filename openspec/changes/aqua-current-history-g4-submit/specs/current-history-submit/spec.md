@@ -182,3 +182,21 @@ exact insertion proof and SHALL NOT scan the whole window or click a control.
 
 - **WHEN** the nearby recognized send control remains disabled after text insertion
 - **THEN** no automatic Return is posted until all existing proof requirements hold
+
+### Requirement: Read-only live acceptance window
+
+A temporary loopback monitor SHALL show bridge input/control metadata, separate
+recording intent and CoreAudio confirmation, and independent Return-down/up
+receipt in harmless local fields. It SHALL expose only a fixed test page and
+read-only metadata endpoint, with no recording/control route, directory listing
+or transcript export. Polling and upstream requests SHALL be bounded.
+
+#### Scenario: Live confirmation timing
+
+- **WHEN** a new bridge intent and its first matching CoreAudio confirmation are observed on the same connection
+- **THEN** their monotonic duration may be shown with the correct start/stop direction, without claiming usable samples or preservation of first spoken words
+
+#### Scenario: Unproven or reconnected state
+
+- **WHEN** a connection is new, awaiting a state, reconnected or degraded, or the intent/confirmation pair is ambiguous
+- **THEN** unavailable readiness or timing remains visibly unknown rather than being inferred from an optimistic recording command
