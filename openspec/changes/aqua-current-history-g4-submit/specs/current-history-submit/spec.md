@@ -286,3 +286,62 @@ or transcript content. Posting counts SHALL NOT be presented as delivery proof.
 
 - **WHEN** the initial draft and the final transcript each have a confirmed native posting
 - **THEN** the initial and automatic counters remain separate and neither alone proves target delivery
+
+### Requirement: Passive native acceptance destination
+
+An optional receiver SHALL use unique bundle `org.aqua.acceptance.receiver` and
+app name `Aqua Input Receiver`. Its real small AXGroup composer SHALL contain one
+normal editable NSTextView marked `Aqua Native Testfeld C` and one normal
+`Send message` button with no Return key equivalent. Status labels SHALL remain
+outside that composer. Native value and selection SHALL retain normal AppKit behavior.
+
+#### Scenario: Receiver field proof
+
+- **WHEN** the sole input owner later launches the receiver in a confirmed idle state
+- **THEN** the actual process, focused field, AX group, editable value and selection must be independently read before input is permitted
+
+### Requirement: Independent native receiver receipts
+
+The receiver SHALL count delivered Return downs, ups, complete same-key pairs
+and local submissions separately, excluding repeats and composing events.
+Orphaned, duplicate and focus-interrupted keys SHALL remain visible. A successful
+local submission SHALL synchronously clear the same text view and collapse its
+cursor to zero. A button submission SHALL NOT fabricate keyboard receipts.
+
+#### Scenario: Local Return clears its own field
+
+- **WHEN** a nonrepeat noncomposing Return reaches a nonempty receiver field and its matching up follows
+- **THEN** one local submission clears that same field and counters distinguish the down, up and pair without sending a message
+
+#### Scenario: Focus or key mismatch
+
+- **WHEN** focus is lost or Return and keypad-Enter releases do not match their held key
+- **THEN** no missing pair or additional submission is invented
+
+### Requirement: Private native receiver metadata
+
+The receiver SHALL atomically replace only fixed `receiver-status.json` beside
+its own bundle with mode 0600 and a bounded event ring. Its whitelist SHALL
+contain only instance/PID, fixed codes including Return key codes, counts,
+UTF16 length/selection, focus/health flags and times. Text, audio, clipboard
+content and unrelated app state SHALL NOT be exported. Receipt failure SHALL
+visibly disable further submissions.
+
+#### Scenario: Metadata write and failure
+
+- **WHEN** the receiver updates its receipt
+- **THEN** an atomic private replacement contains only allowed metadata and does not follow a destination symlink
+- **AND** a write failure cannot silently authorize another local submission
+
+### Requirement: Receiver ownership and evidence scope
+
+The receiver SHALL NOT synthesize input, create global hooks, poll the clipboard,
+record audio, use the network or control Aqua or other applications. Build and
+offline checks SHALL NOT launch it. A later live probe SHALL retain the sole
+runtime owner and exact target checks. Receiver results SHALL NOT substitute
+for physical mouse, speech, first-word or existing Electron/browser acceptance.
+
+#### Scenario: Additional isolated test target
+
+- **WHEN** receiver model checks, compilation or a later simulated local probe succeed
+- **THEN** evidence identifies that limited scope and leaves missing real-input, speech, latency and browser/Codex requirements open

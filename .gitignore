@@ -15,3 +15,8 @@ __pycache__/
 # Agent / local tooling artifacts
 .notebooklm/
 .supergoal/
+
+# Passive local receiver build and private receipt
+packages/mouse-bridge/tools/native-receiver/*.app/
+packages/mouse-bridge/tools/native-receiver/receiver-status.json
+packages/mouse-bridge/tools/native-receiver/.receiver-status-*.tmp

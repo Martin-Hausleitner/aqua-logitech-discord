@@ -158,6 +158,48 @@ control route, transcript export or directory listing. Local test-text stays
 in the page; optional measurement export omits it. Stop the temporary monitor
 after testing.
 
+## Optional native acceptance receiver
+
+For an additional isolated AppKit destination, prepare the passive receiver:
+
+```sh
+bash tools/native-receiver/check-model.sh
+bash tools/native-receiver/build.sh
+```
+
+Run these commands from this package directory. They run separate Foundation/
+filesystem checks and build `tools/native-receiver/Aqua Input Receiver.app`;
+they never launch, install or register the GUI app. The 11 receiver checks are
+separate from the existing 334 Node package tests.
+
+The receiver uses bundle ID `org.aqua.acceptance.receiver` and window title
+`Aqua – Native Eingabeprüfung`. One normal NSTextView marked
+`Aqua Native Testfeld C` and a normal `Send message` button share a small real
+accessibility group. The button has no Return key equivalent. Delivered Return
+downs, ups, same-key pairs and local submissions are counted separately;
+repeats, composition, duplicate downs and focus loss cannot manufacture pairs.
+A local submission clears the same text view and its cursor synchronously.
+It sends no message and starts no recording.
+
+Only whitelisted counts, identity, length/selection, focus/health flags, fixed
+codes and times enter the bounded `receiver-status.json` next to its own app
+bundle. Replacement is atomic and private (0600). No text, audio or clipboard
+content is exported. Standard focused AppKit editing permits Aqua's normal
+paste action; the receiver does not poll the clipboard. It creates no global
+hook or synthetic input and has no network or Aqua-control path.
+
+Only the existing input/runtime owner should later launch it, after confirming
+idle recording state and an exact current target. A distinct bundle name alone
+does not prove one process, correct focus or working AX attributes. Existing
+browser-target guards must stay intact; a separate target needs its own exact
+verification. Stop the receiver after the owned probe.
+
+Compilation and model checks prove neither live key delivery nor physical
+mouse/speech behavior. A receiver probe also does not establish existing
+browser/Electron/Codex compatibility or preservation of the first spoken words.
+Those original acceptance checks remain open. No successful live receiver
+submission is claimed by the preparation steps above.
+
 ## Audit and optional automatic repair
 
 Every production run writes bounded, private metadata to

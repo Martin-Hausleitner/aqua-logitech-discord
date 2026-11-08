@@ -38,3 +38,13 @@
 - [ ] Observe held-release stop without automatic Return, processing clicks sharing one pending submission, and automatic Return overlap without a second key.
 - [ ] Observe invalidated initial proof or failed rebase suppressing later Return, and native tap loss releasing only the bridge's owned Fn.
 - [ ] Confirm current macOS Accessibility permission and functional native input before physical acceptance.
+
+## 4. Optional passive native acceptance receiver
+
+- [x] Specify the separate AppKit receiver, true composer group, local receipts, private metadata and evidence limits; strict OpenSpec validation passed before source transfer.
+- [x] Transfer only the reviewed receiver sources and offline check scripts under tools/native-receiver; retain existing production sources and guards.
+- [x] Run the receiver's 11 separate Foundation/filesystem checks in the publication candidate, including focus/repeat/key-pair regressions, receipt failure and private atomic replacement.
+- [x] Compile byte-identical receiver sources in isolated task work without launching, installing or registering the app as part of that build; preserve the single later owner-launched test instance.
+- [x] Independently verify the copied receiver scope and publication privacy/ignore rules: exactly nine allowed files, matching frozen source bytes, private build/status/temp outputs ignored, no production changes.
+- [ ] Observe an owner-controlled live receiver submission with actual Return receipt and same-field empty/cursor-zero rebase; missing-focus or zero-Enter attempts remain incomplete.
+- [ ] Retain all original physical mouse, speech, first-word, latency and browser/Electron/Codex acceptance requirements regardless of isolated receiver results.
