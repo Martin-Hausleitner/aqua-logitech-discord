@@ -206,6 +206,9 @@ Every production run writes bounded, private metadata to
 `~/Library/Logs/aqua-mouse-audit.jsonl` (0600; 2 MiB plus three rotated files).
 It records route, opaque run ID, fixed result codes and phase duration. It
 never records dictated text, clipboard content, window titles or audio.
+Known native focus failures may also retain their strictly whitelisted numeric
+`axErrorCode` from the original reply; the normalized reason and all input,
+proof and repair decisions stay unchanged. Unknown payloads are omitted.
 `enter_emitted` means **posted**, with delivery explicitly **not proven**.
 
 Automatic repair is off by default. To opt in with an existing authenticated

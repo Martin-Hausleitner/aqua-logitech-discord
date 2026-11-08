@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createMachine, reduce } from "./state-machine.mjs";
 import { shouldSubmit } from "./submit-policy.mjs";
 import { randomUUID } from "node:crypto";
-import { sanitizeReasonCode } from "./audit-log.mjs";
+import { sanitizeAuditEvent, sanitizeReasonCode } from "./audit-log.mjs";
 
 const source = await readFile(join(dirname(fileURLToPath(import.meta.url)), "mouse-bridge.mjs"), "utf8");
 const nativeStatusCallback = source.match(/\n  onStatus: (\w+),/)?.[1];
@@ -1106,6 +1106,28 @@ function initialHarness(overrides = {}) {
   });
   return { ...h, calls, nativeCalls, gate };
 }
+
+test('initial focus failure reaches the audit sanitizer with its original AX code', async () => {
+  const events = [];
+  let initialCalls = 0;
+  const { bridge } = initialHarness({
+    // The controller runs in a VM realm; copy its known event into this realm.
+    auditLog: { record: (event) => events.push(sanitizeAuditEvent({ ...event })), close: async () => {} },
+    gate: { initialEnterAndRebase: async () => {
+      initialCalls++;
+      return { ok: false, reason: 'focus_missing_-25204', posted: false, rebaseReady: false };
+    } },
+  });
+  await bridge.shortClickInput.down('front', '1000000000');
+  await bridge.shortClickInput.up('front', '1080000000');
+  const event = events.find(({ eventType }) => eventType === 'initial_rebase');
+  assert.equal(event?.reason, 'focus_missing');
+  assert.equal(event?.axErrorCode, -25204);
+  assert.equal(event?.status, 'failed');
+  assert.equal(initialCalls, 1);
+  assert.equal(bridge.metrics().enterCount, 0);
+  assert.equal(events.some(({ eventType }) => eventType === 'enter_emitted'), false);
+});
 
 for (const button of ['front', 'back']) {
   test(`${button} short first click sends its captured draft once and retains that token for the final transcript`, async () => {

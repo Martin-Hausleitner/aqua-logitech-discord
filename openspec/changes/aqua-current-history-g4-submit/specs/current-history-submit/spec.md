@@ -145,6 +145,23 @@ exclusive ownership and maintenance guards SHALL survive bridge restarts.
 - **WHEN** the maintenance marker exists or input/recording is still active
 - **THEN** no automatic runtime repair is performed
 
+### Requirement: Typed private focus diagnostics
+
+The private audit MAY retain a numeric `axErrorCode` derived only from a known
+native focus-failure reason. Normalized reasons and all control, proof and repair
+decisions SHALL remain unchanged. Arbitrary fields, unknown strings and getters
+SHALL NOT become diagnostic payloads.
+
+#### Scenario: Known initial focus error
+
+- **WHEN** the initial rebase fails with one of the five recognized native focus-error suffixes
+- **THEN** the initial_rebase audit retains its numeric code alongside the unchanged normalized reason
+
+#### Scenario: Untrusted diagnostic payload
+
+- **WHEN** an event supplies an unknown reason, a forged axErrorCode field, private text or an accessor
+- **THEN** the audit omits those values without reading getters or changing input decisions
+
 ### Requirement: State-based native clicks
 
 An idle native down SHALL immediately start Fn control and native destination

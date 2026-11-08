@@ -66,8 +66,13 @@ export function sanitizeAuditEvent(event) {
     const output = { eventType };
     for (const key of ["id", "runId"]) if (isOpaqueId(get(key))) output[key] = get(key);
     if (ROUTES.has(get("route"))) output.route = get("route");
-    const reason = sanitizeReasonCode(get("reason"));
+    const rawReason = get("reason");
+    const reason = sanitizeReasonCode(rawReason);
     if (reason) output.reason = reason;
+    if (typeof rawReason === "string" && rawReason.startsWith("focus_missing_") &&
+        FOCUS_FAILURE_CODES.has(rawReason.slice(14))) {
+      output.axErrorCode = Number(rawReason.slice(14));
+    }
     if (STATUSES.has(get("status"))) output.status = get("status");
     const durationMs = get("durationMs");
     if (typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0 && durationMs <= 86_400_000) {

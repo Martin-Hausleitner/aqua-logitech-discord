@@ -361,7 +361,7 @@ function requestInitialEnter(button, owner) {
       audit("enter_emitted", context, { reason: "initial_posted" });
     }
     audit("initial_rebase", context, {
-      status: run.rebaseReady ? "ready" : "failed", reason: sanitizeReasonCode(result?.reason),
+      status: run.rebaseReady ? "ready" : "failed", reason: result?.reason,
     });
     // Initial posting does not consume/cancel the token. The same helper must
     // retain the rebased destination for the final transcript proof.

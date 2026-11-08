@@ -37,6 +37,51 @@ test("Enter records explicitly distinguish posting from proven delivery", () => 
   });
 });
 
+test("focus failures preserve only the known numeric AX code from the original reason", () => {
+  for (const axErrorCode of [0, -25202, -25204, -25205, -25212]) {
+    assert.deepEqual(sanitizeAuditEvent({ eventType: "initial_rebase", status: "failed",
+      reason: `focus_missing_${axErrorCode}`, axErrorCode: "private forged code", pid: 99999 }), {
+      eventType: "initial_rebase", reason: "focus_missing", axErrorCode, status: "failed",
+    });
+  }
+  for (const reason of ["focus_missing", "draft_changed", "initial_empty", "no_send_control"]) {
+    assert.deepEqual(sanitizeAuditEvent({ eventType: "initial_rebase", reason, axErrorCode: -25204 }), {
+      eventType: "initial_rebase", reason,
+    });
+  }
+  let getterCalls = 0;
+  assert.deepEqual(sanitizeAuditEvent({ eventType: "initial_rebase",
+    get reason() { getterCalls++; return "focus_missing_-25204"; },
+    get axErrorCode() { getterCalls++; return -25204; },
+  }), { eventType: "initial_rebase" });
+  assert.equal(getterCalls, 0);
+});
+
+test("unknown AX codes and private payloads never reach the audit file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aqua-audit-ax-redaction-"));
+  const path = join(dir, "audit.jsonl");
+  const audit = createAuditLog({ path });
+  const reasons = ["focus_missing_-25203", "focus_missing_123456789", "focus_missing_",
+    "focus_missing_-0", "focus_missing_-025204", "focus_missing_-25204.0",
+    "focus_missing_-25204\nprivate synthetic transcript", "focus_missing_-25204 private title",
+    "private synthetic transcript", "focus_missing_{\"pid\":99999}",
+    null, -25204, { toString() { throw new Error("must not stringify private data"); } }];
+  try {
+    for (const reason of reasons) {
+      const event = { eventType: "initial_rebase", status: "failed", reason,
+        axErrorCode: -25204, text: "private synthetic transcript", pid: 99999 };
+      assert.deepEqual(sanitizeAuditEvent(event), { eventType: "initial_rebase", status: "failed" });
+      assert.equal(audit.record(event), true);
+    }
+    await audit.flush();
+    const lines = await readLines(path);
+    assert.equal(lines.length, reasons.length);
+    for (const { v, seq, timestamp, ...event } of lines) {
+      assert.deepEqual(event, { eventType: "initial_rebase", status: "failed" });
+    }
+  } finally { await audit.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
 test("ordered async writes snapshot mutable input and create private files and new directories", async () => {
   const dir = await mkdtemp(join(tmpdir(), "aqua-audit-"));
   const path = join(dir, "private", "nested", "audit.jsonl");

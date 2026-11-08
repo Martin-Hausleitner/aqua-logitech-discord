@@ -20,10 +20,11 @@
 - [x] Expose state click mode and recognized-send-control initial-draft policy without changing HTTP toggle semantics.
 - [x] Add a read-only local live window with separate control, CoreAudio and independent Return receipt evidence.
 - [x] Whitelist numeric autoEnterCount, initialEnterCount and initialEnterAttempts in the monitor.
+- [x] Preserve only known numeric native focus-error codes from the original initial-rebase reply in the private audit, without changing normalized reasons or input decisions.
 
 ## 2. Validate
 
-- [x] Run the final publication candidate's full isolated regression suite: 334 tests passed, zero failures and zero skipped tests, including initial-send/rebase and the read-only monitor.
+- [x] Run the current publication candidate's full isolated regression suite: 337 tests passed, zero failures and zero skipped tests, including initial-send/rebase, private AX diagnostics and the read-only monitor. The receiver's eleven Foundation checks are separate.
 - [x] Compile the changed native paste helper in the final publication candidate without starting it; native input and HID sources are unchanged in this update.
 - [x] Strictly validate the updated state-based click and initial-draft OpenSpec delta before source transfer.
 - [x] Complete final publication diff/privacy checks after source transfer; frozen sources match and the allowed patch passes whitespace and privacy checks.
