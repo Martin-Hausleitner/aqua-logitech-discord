@@ -584,3 +584,114 @@ test("cancellation during the termination wait cannot revive the new token", asy
   assert.equal((await gate.manualEnter({ token: "new" })).reason, "stale_run");
   await gate.close();
 });
+
+test("successfully consumed manual requests reuse one live sender without sleeps or retries", async () => {
+  const children = [];
+  const requests = [];
+  const signals = [];
+  const gate = new VerifiedPasteGate({
+    binary: "/synthetic/verified-paste-gate",
+    spawnImpl: () => {
+      const child = new FakeChild();
+      const write = child.stdin.write;
+      const kill = child.kill.bind(child);
+      child.stdin.write = (line) => { requests.push(JSON.parse(line)); write(line); };
+      child.kill = (signal) => { signals.push(signal); kill(signal); };
+      children.push(child);
+      return child;
+    },
+  });
+  for (let index = 0; index < 25; index++) {
+    const token = `manual-${index}`;
+    assert.equal((await gate.capture({ token })).ok, true);
+    assert.equal((await gate.manualEnter({ token })).ok, true);
+    assert.equal(gate.releaseConsumed({ token }), true);
+    assert.equal(gate.activeToken, null);
+    assert.equal((await gate.manualEnter({ token })).reason, "stale_run");
+    assert.equal((await gate.capture({ token })).reason, "already_consumed");
+  }
+  assert.equal(children.length, 1);
+  assert.equal(signals.length, 0, "completed posting must not SIGKILL its sender");
+  assert.equal(requests.filter(({ op }) => op === "manual_enter").length, 25);
+  assert.equal(requests.filter(({ op }) => op === "capture").length, 25);
+  await gate.close();
+  assert.equal(signals.includes("SIGTERM"), true, "shutdown still terminates a released sender");
+});
+
+test("release cannot clear an unconsumed, stale, or in-flight token", async () => {
+  let child;
+  const gate = new VerifiedPasteGate({
+    binary: "/synthetic/verified-paste-gate",
+    spawnImpl: () => {
+      child = new FakeChild();
+      const write = child.stdin.write;
+      child.stdin.write = (line) => {
+        if (JSON.parse(line).op === "capture") write(line);
+      };
+      return child;
+    },
+  });
+  await gate.capture({ token: "current" });
+  assert.equal(gate.releaseConsumed({ token: "current" }), false);
+  assert.equal(gate.releaseConsumed({ token: "stale" }), false);
+  const entering = gate.manualEnter({ token: "current" });
+  assert.equal(gate.releaseConsumed({ token: "current" }), false);
+  assert.equal(gate.activeToken, "current");
+  gate.cancel({ token: "current" });
+  assert.equal((await entering).reason, "cancelled");
+  assert.equal(gate.child, null);
+  await gate.close();
+});
+
+test("failed manual Enter keeps hard cancellation instead of releasing the sender", async () => {
+  const signals = [];
+  const gate = new VerifiedPasteGate({
+    binary: "/synthetic/verified-paste-gate",
+    spawnImpl: () => {
+      const child = new FakeChild();
+      const kill = child.kill.bind(child);
+      child.kill = (signal) => { signals.push(signal); kill(signal); };
+      child.stdin.write = (line) => {
+        const request = JSON.parse(line);
+        queueMicrotask(() => child.stdout.emit("data", `${JSON.stringify({
+          ...request, ok: request.op === "capture", reason: "empty_field",
+        })}\n`));
+      };
+      return child;
+    },
+  });
+  await gate.capture({ token: "failed" });
+  assert.equal((await gate.manualEnter({ token: "failed" })).reason, "empty_field");
+  assert.equal(gate.releaseConsumed({ token: "failed" }), false);
+  gate.cancel({ token: "failed" });
+  assert.deepEqual(signals, ["SIGKILL"]);
+  await gate.close();
+});
+
+test("replacement of an unconfirmed Enter still kills the old sender before capture", async () => {
+  const children = [];
+  const gate = new VerifiedPasteGate({
+    binary: "/synthetic/verified-paste-gate",
+    spawnImpl: () => {
+      const child = new FakeChild();
+      const write = child.stdin.write;
+      const kill = child.kill.bind(child);
+      child.signals = [];
+      child.kill = (signal) => { child.signals.push(signal); kill(signal); };
+      if (children.length === 0) child.stdin.write = (line) => {
+        if (JSON.parse(line).op === "capture") write(line);
+      };
+      children.push(child);
+      return child;
+    },
+  });
+  await gate.capture({ token: "unconfirmed" });
+  const entering = gate.manualEnter({ token: "unconfirmed" });
+  assert.equal((await gate.capture({ token: "replacement" })).ok, true);
+  assert.equal((await entering).reason, "cancelled");
+  assert.deepEqual(children[0].signals, ["SIGKILL"]);
+  assert.equal(children.length, 2);
+  assert.equal(gate.releaseConsumed({ token: "unconfirmed" }), false);
+  assert.equal(gate.activeToken, "replacement");
+  await gate.close();
+});

@@ -7,7 +7,8 @@ const HOST = "127.0.0.1:49999";
 const bridge = () => ({
   machine: { mode: "idle", pendingEnterAfterPtt: false, lastEventAt: 100, arbitrary: "private field" },
   busy: false, aquaRecording: false, watchLinked: true, pastePending: false, dry: false,
-  metrics: { totalToggles: 3, frontTaps: 2, backTaps: 1, lastButtonRoute: "front", enterCount: 1, lastCaptureMs: 12, lastStartControlMs: 16,
+  metrics: { totalToggles: 3, frontTaps: 2, backTaps: 1, lastButtonRoute: "front", enterCount: 1, autoEnterCount: 1, initialEnterCount: 0,
+    initialEnterAttempts: 1, lastCaptureMs: 12, lastStartControlMs: 16,
     manualEnterCount: 2, manualEnterAttempts: 3, lastProofMs: 25, lastProofReason: "send_not_ready" },
   nativeMouse: { enabled: true, mode: "active", ready: true, denied: false, rawEvents: 6, lastButton: "front", lastError: null },
   config: { autoSubmit: true, toggleMode: "fn-latch", autoEnterApps: ["private app list"] },
@@ -74,6 +75,9 @@ async function request(monitor, { path = "/api/status", method = "GET", headers 
 test("bridge and watcher whitelists remove all private and unknown payloads", () => {
   const safe = sanitizeBridge(bridge());
   assert.equal(safe.metrics.enterCount, 1);
+  assert.equal(safe.metrics.autoEnterCount, 1);
+  assert.equal(safe.metrics.initialEnterCount, 0, "zero remains observable, not unknown");
+  assert.equal(safe.metrics.initialEnterAttempts, 1);
   assert.equal(safe.metrics.manualEnterCount, 2);
   assert.equal(safe.metrics.manualEnterAttempts, 3);
   assert.equal(safe.metrics.lastProofMs, 25);
@@ -95,6 +99,21 @@ test("bridge and watcher whitelists remove all private and unknown payloads", ()
   assert.doesNotMatch(JSON.stringify(value), /private|secret|discord/);
   assert.equal(sanitizeWatch(watch({ source: "private-path" })), null);
   assert.equal(sanitizeBridge({ ...bridge(), machine: { mode: "invented-mode" } }), null);
+});
+
+test("automatic and initial Enter counters reject nonnumeric, negative and nonfinite payloads", () => {
+  for (const name of ["autoEnterCount", "initialEnterCount", "initialEnterAttempts"]) {
+    for (const invalid of [undefined, null, false, true, "2", "private transcript", {}, [], -1, NaN, Infinity, -Infinity]) {
+      const value = bridge();
+      value.metrics[name] = invalid;
+      const safe = sanitizeBridge(value);
+      assert.equal(Object.hasOwn(safe.metrics, name), false, `${name} must omit ${typeof invalid}`);
+      assert.doesNotMatch(JSON.stringify(safe), /private transcript/);
+    }
+    const value = bridge();
+    value.metrics[name] = 4;
+    assert.equal(sanitizeBridge(value).metrics[name], 4);
+  }
 });
 
 test("initial confirmation never becomes a latency sample; first live match preserves direction", () => {

@@ -9,13 +9,23 @@ separate mouse application also adds an unnecessary runtime dependency.
 
 - Add a bridge-owned native macOS side-button hook with explicit observation
   and active modes; no separate input service or G HUB runtime is required.
-- Map front/G5 to toggle and verified Return, back/G4 to toggle without Return;
-  the stopping button selects the action.
+- Preserve front/G5 stop with verified transcript Return and back/G4 stop
+  without automatic Return; the stopping button selects the action.
+- Classify native clicks by state: start capture/Fn on idle down, allow one
+  exact original-draft send on short release only with a recognized ready Send
+  control, and require same-field empty/cursor-zero rebase after posting.
+  A held release stops without automatic Return. HTTP toggles stay unchanged.
+- Route short processing clicks to the pending transcript's exact proof, share
+  one overlapping submission, and separate initial and automatic posting counts.
+  Invalidated initial proof or unconfirmed rebase blocks later transcript Return.
 - Support current account-scoped and legacy history with one unambiguous source
   and session-identity freshness across bounded-history rollover.
 - Preserve exact native field proof and process-targeted Return, including normal
   Electron accessibility activation where needed.
 - Add isolated regression tests, portable build scripts and native installation.
+- Preserve a completed native sender through normal token release, release owned
+  Fn on tap loss, and expose state-mode configuration and three separate initial/
+  automatic counters in the read-only monitor.
 
 ## Capabilities
 

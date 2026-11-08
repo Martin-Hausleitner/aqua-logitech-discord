@@ -7,8 +7,9 @@ import Foundation
 //
 // The process accepts newline-delimited JSON on stdin. It never writes an AX
 // value, transcript, field name, or window title to stdout/stderr or disk.
-// The only key event it can emit is Enter, from verify_and_enter or an explicit
-// manual_enter after this process has revalidated the captured AX destination.
+// The only key event it can emit is Enter, from a verified transcript, an
+// explicit manual request or an unchanged initial draft with an active Send
+// control, after this process has revalidated the captured AX destination.
 
 private let valueAttribute = kAXValueAttribute as CFString
 private let selectedRangeAttribute = kAXSelectedTextRangeAttribute as CFString
@@ -52,10 +53,12 @@ private struct Response: Encodable {
     let token: String
     let ok: Bool
     let reason: String?
+    let posted: Bool?
+    let rebaseReady: Bool?
 }
 
-private func response(for request: Request, ok: Bool, reason: String? = nil) {
-    let output = Response(id: request.id, op: request.op, token: request.token, ok: ok, reason: reason)
+private func response(for request: Request, ok: Bool, reason: String? = nil, posted: Bool? = nil, rebaseReady: Bool? = nil) {
+    let output = Response(id: request.id, op: request.op, token: request.token, ok: ok, reason: reason, posted: posted, rebaseReady: rebaseReady)
     guard let data = try? JSONEncoder().encode(output), let line = String(data: data, encoding: .utf8) else { return }
     FileHandle.standardOutput.write(Data((line + "\n").utf8))
 }
@@ -141,16 +144,18 @@ private func focusedElement(in application: AXUIElement, pid: pid_t) -> (element
     return (element, "ok")
 }
 
-private func readSnapshot() -> (snapshot: AXSnapshot?, reason: String) {
+private func readSnapshot(messagingTimeout: Float? = nil) -> (snapshot: AXSnapshot?, reason: String) {
     guard AXIsProcessTrusted() else { return (nil, "permission") }
     guard let pid = frontmostPid() else { return (nil, "app_missing") }
     let application = AXUIElementCreateApplication(pid)
+    if let messagingTimeout { AXUIElementSetMessagingTimeout(application, messagingTimeout) }
     var applicationPid: pid_t = 0
     guard AXUIElementGetPid(application, &applicationPid) == .success, applicationPid == pid else {
         return (nil, "app_changed")
     }
     let focus = focusedElement(in: application, pid: pid)
     guard let focused = focus.element else { return (nil, focus.reason) }
+    if let messagingTimeout { AXUIElementSetMessagingTimeout(focused, messagingTimeout) }
     var focusedPid: pid_t = 0
     guard AXUIElementGetPid(focused, &focusedPid) == .success, focusedPid == pid, frontmostPid() == pid else {
         return (nil, "app_changed")
@@ -314,6 +319,26 @@ private func verifyManual(_ baseline: AXSnapshot) -> (snapshot: AXSnapshot?, rea
     return (current, "ok")
 }
 
+// The initial Enter may only send the exact draft and caret captured at Down.
+private func initialTargetFailure(_ baseline: AXSnapshot, _ current: AXSnapshot) -> String? {
+    if current.pid != baseline.pid { return "app_changed" }
+    if !sameElement(current.window, baseline.window) { return "window_changed" }
+    if !sameElement(current.element, baseline.element) { return "focus_changed" }
+    return nil
+}
+
+private func verifyInitialDraft(_ baseline: AXSnapshot) -> (snapshot: AXSnapshot?, reason: String) {
+    let result = readSnapshot(messagingTimeout: 0.025)
+    guard let current = result.snapshot else { return (nil, result.reason) }
+    if let reason = initialTargetFailure(baseline, current) { return (nil, reason) }
+    guard baseline.value.utf16.elementsEqual(current.value.utf16) else { return (nil, "draft_changed") }
+    guard isValid(baseline.selection, in: baseline.value), baseline.selection.length == 0,
+          current.selection.length == 0, current.selection.location == baseline.selection.location else {
+        return (nil, "caret_changed")
+    }
+    return (current, "ok")
+}
+
 private func sameVerifiedState(_ left: AXSnapshot, _ right: AXSnapshot) -> Bool {
     left.pid == right.pid && sameElement(left.window, right.window) &&
         sameElement(left.element, right.element) && left.value.utf16.elementsEqual(right.value.utf16) &&
@@ -342,6 +367,7 @@ private final class Gate {
     private var token: String?
     private var baseline: AXSnapshot?
     private var consumed = false
+    private var initialAttempted = false
     private var requiresSendReadiness = false
 
     func handle(_ request: Request) {
@@ -351,6 +377,10 @@ private final class Gate {
         }
         switch request.op {
         case "capture":
+            guard token != request.token || !initialAttempted else {
+                response(for: request, ok: false, reason: "initial_already_attempted")
+                return
+            }
             guard token != request.token || !consumed else {
                 response(for: request, ok: false, reason: "already_consumed")
                 return
@@ -363,10 +393,91 @@ private final class Gate {
             token = request.token
             baseline = snapshot
             consumed = false
-            // Capture is on the physical key path. Traverse composer controls
-            // only after a complete automatic paste proof, never before Fn.
+            initialAttempted = false
+            // Capture is on the physical key path. Composer traversal belongs
+            // to a later explicit initial-send request or a complete paste proof.
             requiresSendReadiness = false
             response(for: request, ok: true)
+        case "initial_enter_and_rebase":
+            guard token == request.token, let original = baseline else {
+                response(for: request, ok: false, reason: "stale_run", posted: false, rebaseReady: false)
+                return
+            }
+            guard !consumed, !initialAttempted else {
+                response(for: request, ok: false, reason: consumed ? "already_consumed" : "initial_already_attempted", posted: false, rebaseReady: baseline != nil)
+                return
+            }
+            initialAttempted = true // Never retry a possibly posted initial Enter.
+            let first = verifyInitialDraft(original)
+            guard let snapshot = first.snapshot else {
+                baseline = nil
+                response(for: request, ok: false, reason: first.reason, posted: false, rebaseReady: false)
+                return
+            }
+            if original.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                response(for: request, ok: true, reason: "initial_empty", posted: false, rebaseReady: true)
+                return
+            }
+            let send = sendReadiness(snapshot)
+            requiresSendReadiness = requiresSendReadiness || send.recognized
+            guard send.recognized, send.ready else {
+                response(for: request, ok: false, reason: send.recognized ? "send_not_ready" : "no_send_control", posted: false, rebaseReady: true)
+                return
+            }
+            guard let events = prepareEnterEvents() else {
+                response(for: request, ok: false, reason: "key_prepare_failed", posted: false, rebaseReady: true)
+                return
+            }
+            let final = verifyInitialDraft(original)
+            guard let finalSnapshot = final.snapshot, sameVerifiedState(snapshot, finalSnapshot) else {
+                baseline = nil
+                response(for: request, ok: false, reason: final.snapshot == nil ? final.reason : "revalidation_failed", posted: false, rebaseReady: false)
+                return
+            }
+            let finalSend = sendReadiness(finalSnapshot)
+            requiresSendReadiness = requiresSendReadiness || finalSend.recognized
+            guard finalSend.recognized, finalSend.ready else {
+                response(for: request, ok: false, reason: finalSend.recognized ? "send_not_ready" : "no_send_control", posted: false, rebaseReady: true)
+                return
+            }
+            // The bounded Send traversal may outlive a focus or draft change.
+            let emission = verifyInitialDraft(original)
+            guard let emissionSnapshot = emission.snapshot, sameVerifiedState(finalSnapshot, emissionSnapshot) else {
+                baseline = nil
+                response(for: request, ok: false, reason: emission.snapshot == nil ? emission.reason : "revalidation_failed", posted: false, rebaseReady: false)
+                return
+            }
+            baseline = nil // Old draft cannot authorize the later transcript.
+            requiresSendReadiness = true
+            postEnter(events, to: original.pid)
+            let timeout = min(max(request.timeoutMs ?? 1000, 1), 1000)
+            let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(timeout) * 1_000_000
+            while DispatchTime.now().uptimeNanoseconds < deadline {
+                let read = readSnapshot(messagingTimeout: 0.025)
+                guard let current = read.snapshot else {
+                    response(for: request, ok: false, reason: read.reason, posted: true, rebaseReady: false)
+                    return
+                }
+                if let reason = initialTargetFailure(original, current) {
+                    response(for: request, ok: false, reason: reason, posted: true, rebaseReady: false)
+                    return
+                }
+                guard DispatchTime.now().uptimeNanoseconds < deadline else { break }
+                if current.value.isEmpty && current.selection.location == 0 && current.selection.length == 0 {
+                    baseline = current
+                    response(for: request, ok: true, reason: "initial_rebased", posted: true, rebaseReady: true)
+                    return
+                }
+                guard sameVerifiedState(original, current) else {
+                    response(for: request, ok: false, reason: "rebase_unexpected_value", posted: true, rebaseReady: false)
+                    return
+                }
+                // Poll the observed same-target state; never retry Enter.
+                let now = DispatchTime.now().uptimeNanoseconds
+                let remaining = deadline > now ? deadline - now : 0
+                usleep(useconds_t(min(15_000, remaining / 1000)))
+            }
+            response(for: request, ok: false, reason: "rebase_timeout", posted: true, rebaseReady: false)
         case "verify_and_enter":
             guard token == request.token, let baseline else {
                 response(for: request, ok: false, reason: "stale_run")
@@ -449,6 +560,7 @@ private final class Gate {
                 token = nil
                 baseline = nil
                 consumed = false
+                initialAttempted = false
                 requiresSendReadiness = false
             }
             response(for: request, ok: true)

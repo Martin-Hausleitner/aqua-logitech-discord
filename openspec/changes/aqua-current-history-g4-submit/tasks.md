@@ -9,22 +9,32 @@
 - [x] Use acknowledged warm Fn control with release ownership across helper failures.
 - [x] Require a stable collapsed cursor at the insertion boundary before Return.
 - [x] Add bounded private audit, validated local webhook and independently owned repair jobs.
-- [x] Add explicit short follow-up Return on both buttons without a recording restart or repeat timer.
+- [x] Start native capture/Fn on idle down; classify short and held release by state without a post-stop window.
+- [x] Attempt the exact original nonempty draft once only with a recognized ready Send control; keep the same token and require empty-field/cursor-zero rebase after posting.
+- [x] Block later transcript Return after invalidated initial proof, unknown posting or failed rebase; preserve a proven unchanged baseline for safely unposted rejections.
+- [x] Route short processing clicks to the pending transcript's original exact proof and coalesce overlapping submission requests.
 - [x] Revalidate manual destinations and coordinate manual requests with automatic Return.
 - [x] Check recognized nearby send controls before automatic Return.
+- [x] Keep automatic transcript counts separate from initial-draft and manual posting counts.
+- [x] Retain known posted native senders at normal token completion and release owned Fn on mouse-tap loss.
+- [x] Expose state click mode and recognized-send-control initial-draft policy without changing HTTP toggle semantics.
 - [x] Add a read-only local live window with separate control, CoreAudio and independent Return receipt evidence.
+- [x] Whitelist numeric autoEnterCount, initialEnterCount and initialEnterAttempts in the monitor.
 
 ## 2. Validate
 
-- [x] Run the isolated package regression suite in the publication candidate (222 tests passed, including short follow-ups, manual destination proof and the read-only live monitor).
-- [x] Compile the native input, HID and paste helpers without starting them.
-- [x] Run strict OpenSpec validation and publication diff/privacy checks.
-- [x] Independently review input ownership, shutdown, proof timing, audit and repair concurrency.
+- [x] Run the final publication candidate's full isolated regression suite: 334 tests passed, zero failures and zero skipped tests, including initial-send/rebase and the read-only monitor.
+- [x] Compile the changed native paste helper in the final publication candidate without starting it; native input and HID sources are unchanged in this update.
+- [x] Strictly validate the updated state-based click and initial-draft OpenSpec delta before source transfer.
+- [x] Complete final publication diff/privacy checks after source transfer; frozen sources match and the allowed patch passes whitespace and privacy checks.
+- [x] Independently review the changed frozen scope: held releases, tap-loss Fn ownership, pending-transcript overlap, initial-send/rebase proof, cancellation/shutdown and sender lifetime (67 targeted isolated tests passed; 15 frozen file hashes verified before and after; no new P1/P2 findings). Audit/repair foundations are unchanged and retain their earlier separate review.
 
 ## 3. Physical acceptance
 
-- [ ] Observe physical front/G5 start, real Aqua transcription and front/G5 stop with exactly one Return received independently.
-- [ ] Observe physical back/G4 stop with real text inserted and no Return, including after a front-button start.
+- [ ] Observe physical front/G5 start, real Aqua transcription and front/G5 stop with exactly one final transcript Return received independently.
+- [ ] Observe physical back/G4 stop with real text inserted and no final transcript Return, including after a front-button start.
 - [ ] Observe focus change suppressing Return and verify no competing side-button dispatcher.
-- [ ] Observe short follow-ups on both buttons, long holds, expiry and overlap with automatic Return without a second key.
+- [ ] Observe immediate idle-down start on both buttons, one exact initial draft on short release, and same-field empty/cursor-zero rebase before real transcript insertion.
+- [ ] Observe held-release stop without automatic Return, processing clicks sharing one pending submission, and automatic Return overlap without a second key.
+- [ ] Observe invalidated initial proof or failed rebase suppressing later Return, and native tap loss releasing only the bridge's owned Fn.
 - [ ] Confirm current macOS Accessibility permission and functional native input before physical acceptance.

@@ -77,7 +77,6 @@ if (!DRY) {
   }
 }
 
-let lastNativeMouseStatus = "";
 const nativeMouseInput = createNativeMouseInput({
   enabled: !DRY && /^(1|true)$/i.test(process.env.AQUA_NATIVE_MOUSE_INPUT ?? "0"),
   mode: process.env.AQUA_NATIVE_MOUSE_MODE ?? "observe",
@@ -87,18 +86,7 @@ const nativeMouseInput = createNativeMouseInput({
       Promise.resolve(shortClickInput.up(event.button, event.monotonicNs)).catch(() => log("manual Enter failed"));
     }
   },
-  onStatus: (status) => {
-    if (!status.ready) shortClickInput.reset();
-    const signature = JSON.stringify([status.running, status.ready, status.denied, status.lastError]);
-    if (signature === lastNativeMouseStatus) return;
-    lastNativeMouseStatus = signature;
-    log("native mouse input", `mode=${status.mode}`, `ready=${status.ready}`, `denied=${status.denied}`,
-      status.lastError ?? "");
-    if (status.enabled && status.mode === "active" && !status.ready &&
-        (status.denied || status.lastError === "restart_limit")) {
-      void recoverUnavailableNativeInput(status);
-    }
-  },
+  onStatus: handleNativeMouseStatus,
 });
 
 let machine = createMachine();
@@ -245,7 +233,10 @@ const metrics = {
   totalLatencyMs: 0,
   avgLatencyMs: 0,
   enterCount: 0,
+  autoEnterCount: 0,
   manualEnterCount: 0,
+  initialEnterCount: 0,
+  initialEnterAttempts: 0,
   manualEnterAttempts: 0,
   lastEnterAt: null,
   lastSettleReason: null,
@@ -304,26 +295,113 @@ let shuttingDown = false;
 let shutdownPromise = null;
 let currentAuditRun = null;
 let controlRecovery = false;
+let nativeInputRecovery = false;
+let lastNativeMouseStatus = "";
 let autoEnterInFlight = false;
 let manualEnterInFlight = false;
+let manualEnterGeneration = null;
 const shortClickInput = createShortClickInput({
-  getState: () => ({ mode: machine.mode, busy, stopAt: stopRequestedAt, enterCount: metrics.enterCount }),
-  toggle: (button) => handleEvent(button === "front" ? "BUTTON_SEND_TAP" : "BUTTON_DICTATE_TAP"),
+  getState: () => ({
+    mode: machine.mode, busy, autoEnterCount: metrics.autoEnterCount,
+    recordingId: currentAuditRun?.id, generation: inputGeneration,
+    nativeReady: !shuttingDown && !controlRecovery && !nativeInputRecovery && (DRY || nativeMouseInput.status().ready),
+  }),
+  toggle: (button, { startFromIdle } = {}) => handleEvent(
+    button === "front" ? "BUTTON_SEND_TAP" : "BUTTON_DICTATE_TAP", { startFromIdle }),
+  stopHeld: (_button, owner) => {
+    if (machine.mode !== "toggle_recording" || currentAuditRun?.id !== owner.recordingId || inputGeneration !== owner.generation) {
+      return { ok: false, reason: "superseded", state: machine, actions: [] };
+    }
+    return handleEvent("BUTTON_HELD_RELEASE", { countInput: false });
+  },
   enter: (button) => requestManualEnter(button),
+  initialEnter: (button, owner) => requestInitialEnter(button, owner),
 });
+
+function requestInitialEnter(button, owner) {
+  const run = activePasteGateRun;
+  const ownsRecording = () => !shuttingDown && !controlRecovery && !nativeInputRecovery &&
+    machine.mode === "toggle_recording" && currentAuditRun?.id === owner?.recordingId &&
+    inputGeneration === owner?.generation && activePasteGateRun === run &&
+    run?.generation === inputGeneration;
+  const skipped = (reason, rebaseReady = true) => ({ ok: false, reason, posted: false, rebaseReady });
+  if (!ownsRecording() || pendingStartCapture || !run?.captured) return Promise.resolve(skipped("superseded"));
+  if (!AUTO_SUBMIT || DRY || !verifiedPasteGate) return Promise.resolve(skipped("preview"));
+  if (run.initialAttempted) return run.initialEnterPromise;
+  run.initialAttempted = true;
+  run.rebaseReady = false;
+  run.initialAbort = new AbortController();
+  const context = { ...currentAuditRun, route: button };
+  metrics.initialEnterAttempts++;
+  audit("input", context, { status: "started", reason: "initial_enter" });
+  // Publish the promise before calling a possibly synchronous callback. Only
+  // this captured token may send the initial draft and establish its baseline.
+  run.initialEnterPromise = Promise.resolve().then(async () => {
+    let result;
+    if (!ownsRecording() || run.initialAbort.signal.aborted) {
+      result = skipped("cancelled");
+    } else if (typeof verifiedPasteGate.initialEnterAndRebase !== "function") {
+      result = skipped("no_send_control");
+    } else {
+      try {
+        result = await verifiedPasteGate.initialEnterAndRebase({ token: run.token, signal: run.initialAbort.signal });
+      } catch {
+        // No ACK means unknown posting, never a retry or a reusable baseline.
+        result = { ok: false, reason: "helper_unavailable", posted: null, rebaseReady: false };
+      }
+    }
+    run.rebaseReady = result?.rebaseReady === true;
+    run.initialPosted = result?.posted === true ? true : result?.posted === false ? false : null;
+    if (result?.posted === true) {
+      // Count confirmed posting even if its owner was cancelled meanwhile;
+      // cancellation cannot undo a native event that has already been posted.
+      metrics.enterCount++;
+      metrics.initialEnterCount++;
+      metrics.lastEnterAt = Date.now();
+      audit("enter_emitted", context, { reason: "initial_posted" });
+    }
+    audit("initial_rebase", context, {
+      status: run.rebaseReady ? "ready" : "failed", reason: sanitizeReasonCode(result?.reason),
+    });
+    // Initial posting does not consume/cancel the token. The same helper must
+    // retain the rebased destination for the final transcript proof.
+    return result;
+  });
+  return run.initialEnterPromise;
+}
 
 async function requestManualEnter(button) {
   // Never race a native Enter that may already have been posted. No retries.
-  if (shuttingDown || controlRecovery || autoEnterInFlight || manualEnterInFlight ||
+  if (shuttingDown || controlRecovery || nativeInputRecovery || autoEnterInFlight ||
       pendingStartCapture || machine.mode === "toggle_recording" || machine.mode === "ptt_holding") {
     return { ok: false, reason: "input_busy" };
   }
+  // One unacknowledged manual send represents these overlapping requests.
+  // A later click after completion is a new send; nothing is queued or retried.
+  if (manualEnterInFlight) {
+    if (manualEnterGeneration !== inputGeneration) return { ok: false, reason: "cancelled" };
+    return { ok: true, reason: "enter_in_progress", coalesced: true };
+  }
   if (!AUTO_SUBMIT || DRY || !verifiedPasteGate) return { ok: false, reason: "preview" };
+  if (machine.mode === "waiting_settle") {
+    const run = activePasteGateRun;
+    if (!busy || !run?.captured || run.generation !== inputGeneration) {
+      return { ok: false, reason: "missing_proof" };
+    }
+    // This click requests submission of the pending transcript, not whatever
+    // older text happens to be in the field. Keep its original AX destination,
+    // completion wait and generation; repeated requests share one submission.
+    run.submitRequested = true;
+    metrics.manualEnterAttempts++;
+    audit("input", currentAuditRun, { status: "started", reason: "manual_enter" });
+    return { ok: true, reason: "awaiting_transcript" };
+  }
   manualEnterInFlight = true;
   metrics.manualEnterAttempts++;
   const context = { id: randomUUID(), route: button };
   inputGeneration++;
   const generation = inputGeneration;
+  manualEnterGeneration = generation;
   currentSettleAbort?.abort();
   currentSettleAbort = null;
   pendingRestart = false;
@@ -354,8 +432,11 @@ async function requestManualEnter(button) {
     }
     return result;
   } finally {
-    verifiedPasteGate.cancel({ token });
+    // A successful one-shot can keep its sender alive while the application
+    // receives the posted pair. Unconfirmed work still requires a hard abort.
+    if (!verifiedPasteGate.releaseConsumed?.({ token })) verifiedPasteGate.cancel({ token });
     manualEnterInFlight = false;
+    manualEnterGeneration = null;
     if (generation === inputGeneration) busy = false;
   }
 }
@@ -375,32 +456,62 @@ function reportFailure(reason, context = currentAuditRun, fields = {}) {
     .catch(() => audit("fault", context, { status: "failed", reason: "repair_failed" }));
 }
 
-async function recoverUnavailableNativeInput(nativeStatus = {}) {
-  if (shuttingDown || controlRecovery) return;
-  const context = currentAuditRun ?? { id: randomUUID(), route: "legacy" };
-  const ownsHold = machine.mode === "toggle_recording" || machine.mode === "ptt_holding" ||
-    nativeStatus.fnHeld === true || nativeStatus.fnRecoveryRequired === true;
-  if (ownsHold) {
-    // A dead input hook cannot provide the next physical stop. Invalidate its
-    // own intent and proof and release only; keep external recordings alone
-    // when the bridge has no active recording intent.
-    await handleEvent("CANCEL", { countInput: false });
-  } else {
-    // A deferred proof or settle wait does not own Fn. Invalidate only local
-    // work so an independently started keyboard recording is left alone.
-    inputGeneration++;
-    pendingStartCapture = null;
-    cancelPasteGateRun();
-    if (manualEnterInFlight) verifiedPasteGate?.cancel({ token: verifiedPasteGate.activeToken });
-    currentSettleAbort?.abort();
-    currentSettleAbort = null;
-    pendingRestart = false;
-    pendingRestartEvent = null;
-    activeRun = null;
-    busy = false;
-    machine = reduce(machine, { type: "CANCEL" }).state;
+function ownsNativeRecordingIntent(status) {
+  return machine.mode === "toggle_recording" || machine.mode === "ptt_holding" ||
+    status.fnHeld === true || status.fnRecoveryRequired === true;
+}
+
+function handleNativeMouseStatus(status) {
+  if (!status.ready) shortClickInput.reset();
+  const signature = JSON.stringify([status.running, status.ready, status.denied, status.lastError]);
+  if (signature !== lastNativeMouseStatus) {
+    lastNativeMouseStatus = signature;
+    log("native mouse input", `mode=${status.mode}`, `ready=${status.ready}`, `denied=${status.denied}`,
+      status.lastError ?? "");
   }
-  reportFailure("native_input_unavailable", context);
+  if (status.enabled && status.mode === "active" && !status.ready &&
+      (ownsNativeRecordingIntent(status) || status.denied || status.lastError === "restart_limit")) {
+    // Tap rearming discards the physical down/up pairing. Stop an owned hold
+    // now: READY cannot restore the lost release or its recording ownership.
+    return recoverUnavailableNativeInput(status);
+  }
+}
+
+async function recoverUnavailableNativeInput(nativeStatus = {}) {
+  if (shuttingDown || controlRecovery || nativeInputRecovery) return;
+  // Publish before CANCEL can synchronously notify native status again. READY
+  // must not admit a replacement start until this release has completed.
+  nativeInputRecovery = true;
+  const context = currentAuditRun ?? { id: randomUUID(), route: "legacy" };
+  try {
+    const captureOnly = pendingStartCapture && nativeStatus.fnHeld !== true &&
+      nativeStatus.fnRecoveryRequired !== true;
+    if (ownsNativeRecordingIntent(nativeStatus) && !captureOnly) {
+      // Invalidate intent/proof synchronously, then release only. Generation
+      // checks prevent an older deferred start from posting after READY.
+      await handleEvent("CANCEL", { countInput: false, nativeRecovery: true });
+    } else {
+      // No owned Fn (including a start still waiting for capture): invalidate
+      // local work without touching an independently started keyboard recording.
+      inputGeneration++;
+      pendingStartCapture = null;
+      shortClickInput.reset();
+      cancelPasteGateRun();
+      if (manualEnterInFlight) verifiedPasteGate?.cancel({ token: verifiedPasteGate.activeToken });
+      currentSettleAbort?.abort();
+      currentSettleAbort = null;
+      pendingRestart = false;
+      pendingRestartEvent = null;
+      activeRun = null;
+      busy = false;
+      machine = reduce(machine, { type: "CANCEL" }).state;
+    }
+    reportFailure("native_input_unavailable", context);
+  } finally {
+    // A safety cancellation must not arm the recent-stop manual Enter path.
+    stopRequestedAt = null;
+    nativeInputRecovery = false;
+  }
 }
 
 /** Same physical click as Aqua toggle: Discord mute via aqua-watch, not CoreAudio poll. */
@@ -439,7 +550,18 @@ let pendingStartCapture = null;
 function cancelPasteGateRun(run = activePasteGateRun) {
   if (!run) return;
   if (activePasteGateRun === run) activePasteGateRun = null;
+  run.initialAbort?.abort();
   verifiedPasteGate?.cancel({ token: run.token });
+}
+
+function finishPasteGateRun(run) {
+  // A normal completed run must not kill a sender immediately after its known
+  // initial post. Cancel/recovery still use the hard invalidation path above.
+  if (run?.initialPosted === true && verifiedPasteGate?.releaseConsumed?.({ token: run.token })) {
+    if (activePasteGateRun === run) activePasteGateRun = null;
+    return;
+  }
+  cancelPasteGateRun(run);
 }
 
 function beginShutdown() {
@@ -451,6 +573,7 @@ function beginShutdown() {
   pendingStartCapture = null;
   pendingRestart = false;
   pendingRestartEvent = null;
+  activePasteGateRun?.initialAbort?.abort();
   activePasteGateRun = null;
   currentSettleAbort?.abort();
   shutdownPromise = (async () => {
@@ -469,7 +592,8 @@ async function capturePasteFocus(generation, auditContext) {
   if (!verifiedPasteGate || !AUTO_SUBMIT || DRY) return null;
   cancelPasteGateRun();
   const token = `${process.pid ?? "bridge"}-${generation}-${++pasteGateSequence}`;
-  const run = { token, generation, captured: false, expectedText: null };
+  const run = { token, generation, captured: false, expectedText: null, initialAttempted: false,
+    initialEnterPromise: null, initialAbort: null, initialPosted: false, rebaseReady: true };
   activePasteGateRun = run;
   const pending = { run, generation };
   pendingStartCapture = pending;
@@ -509,6 +633,8 @@ async function runActions(actions) {
   let settledAt = null;
   let expectedTranscript = null;
   let pasteRun = activePasteGateRun;
+  const hasRequestedSubmit = () => pasteRun?.captured === true && pasteRun.submitRequested === true &&
+    activePasteGateRun === pasteRun && pasteRun.generation === generation && generation === inputGeneration;
   let startControlAt = null;
   for (const a of actions) {
     if (generation !== inputGeneration) return;
@@ -579,6 +705,16 @@ async function runActions(actions) {
         });
         if (currentSettleAbort === settleAbort) currentSettleAbort = null;
         if (generation !== inputGeneration) return;
+        // Fn-up and the transcript wait run independently of the initial draft
+        // operation. Only the final paste proof must await its confirmed rebase.
+        if (pasteRun?.initialEnterPromise) {
+          await pasteRun.initialEnterPromise;
+          if (generation !== inputGeneration) return;
+          if (activePasteGateRun !== pasteRun || pasteRun.generation !== generation || pasteRun.rebaseReady !== true) {
+            skipEnter = true;
+            reportFailure("initial_rebase_failed", auditContext);
+          }
+        }
 
         settledAt = Date.now();
         metrics.settleCount++;
@@ -593,8 +729,10 @@ async function runActions(actions) {
           metrics.timeoutCount++;
           log(`settle FAILED (${settle.reason}) — skipping Enter to avoid empty/stuck dispatch`);
           skipEnter = true;
-          if (!actions.includes("ENTER_NONE")) reportFailure(settle.reason === "timeout" ? "settle_timeout" : settle.reason, auditContext);
-        } else if (actions.includes("ENTER_NONE") || !AUTO_SUBMIT) {
+          if (!actions.includes("ENTER_NONE") || hasRequestedSubmit()) reportFailure(settle.reason === "timeout" ? "settle_timeout" : settle.reason, auditContext);
+        } else if (skipEnter) {
+          // An unknown/failed rebase cannot authorize any final transcript proof.
+        } else if ((actions.includes("ENTER_NONE") && !hasRequestedSubmit()) || !AUTO_SUBMIT) {
           // Dictation has no Enter proof to collect.
         } else if (pasteRun?.captured) {
           const fresh = readFreshTranscription({
@@ -619,26 +757,27 @@ async function runActions(actions) {
       case "ENTER":
       case "ENTER_FORCE":
       case "ENTER_NONE": {
-        log(a);
-        if (a === "ENTER_NONE" || !shouldSubmit(a, AUTO_SUBMIT)) {
-          audit("suppressed", auditContext, { status: "suppressed", reason: a === "ENTER_NONE" ? "dictation_only" : "preview" });
+        const submitAction = hasRequestedSubmit() ? "ENTER_FORCE" : a;
+        log(submitAction);
+        if (submitAction === "ENTER_NONE" || !shouldSubmit(submitAction, AUTO_SUBMIT)) {
+          audit("suppressed", auditContext, { status: "suppressed", reason: submitAction === "ENTER_NONE" ? "dictation_only" : "preview" });
           log(`Preview mode — suppressing synthetic ${a}`);
-          cancelPasteGateRun(pasteRun);
+          finishPasteGateRun(pasteRun);
           machine = reduce(machine, { type: "SETTLE_DONE" }).state;
           break;
         }
         if (skipEnter) {
           log(`Skipping ${a} because settle did not complete successfully`);
-          cancelPasteGateRun(pasteRun);
+          finishPasteGateRun(pasteRun);
           machine = reduce(machine, { type: "SETTLE_DONE" }).state;
           break;
         }
 
         let doEnter = false;
-        if (a === "ENTER_FORCE") {
+        if (submitAction === "ENTER_FORCE") {
           doEnter = true;
           log("Smart Submit: explicit send -> Auto-Enter=true (native paste proof required)");
-        } else if (a === "ENTER_NONE") {
+        } else if (submitAction === "ENTER_NONE") {
           doEnter = false;
           log("Smart Submit: dictation only -> Auto-Enter=false");
         } else {
@@ -647,10 +786,14 @@ async function runActions(actions) {
           log(`Smart Submit: Auto-Enter=${doEnter}`);
         }
         if (generation !== inputGeneration) return;
+        // Legacy app-policy lookup yields to input. Honor a submit request
+        // received during that lookup against this same transcript and proof.
+        if (hasRequestedSubmit()) doEnter = true;
         if (doEnter) {
-          if (!pasteRun?.captured || typeof expectedTranscript !== "string") {
+          if (!pasteRun?.captured || activePasteGateRun !== pasteRun || pasteRun.generation !== generation ||
+              pasteRun.rebaseReady !== true || typeof expectedTranscript !== "string") {
             log("paste gate proof missing — suppressing Enter");
-            cancelPasteGateRun(pasteRun);
+            finishPasteGateRun(pasteRun);
           } else {
             let gateResult;
             const proofAt = Date.now();
@@ -673,7 +816,7 @@ async function runActions(actions) {
             if (!gateResult?.ok) {
               reportFailure(gateResult?.reason, auditContext, { durationMs: metrics.lastProofMs });
               log(`paste gate rejected (${gateResult?.reason ?? "unknown"}) — suppressing Enter`);
-              cancelPasteGateRun(pasteRun);
+              finishPasteGateRun(pasteRun);
             } else {
               audit("paste_verified", auditContext, { status: "ok", reason: "verified", durationMs: metrics.lastProofMs });
               audit("enter_emitted", auditContext, { reason: "posted",
@@ -681,6 +824,7 @@ async function runActions(actions) {
               if (activePasteGateRun === pasteRun) activePasteGateRun = null;
               if (!DRY) {
                 metrics.enterCount++;
+                metrics.autoEnterCount++;
                 metrics.lastEnterAt = Date.now();
                 metrics.lastStopToEnterMs = stopRequestedAt == null ? null : metrics.lastEnterAt - stopRequestedAt;
                 metrics.lastPostSettleToEnterMs = settledAt == null ? null : metrics.lastEnterAt - settledAt;
@@ -690,7 +834,7 @@ async function runActions(actions) {
           }
         } else {
           audit("suppressed", auditContext, { status: "suppressed", reason: "policy_skip" });
-          cancelPasteGateRun(pasteRun);
+          finishPasteGateRun(pasteRun);
         }
         machine = reduce(machine, { type: "SETTLE_DONE" }).state;
         break;
@@ -731,9 +875,9 @@ async function executeActions(actions) {
   }
 }
 
-async function handleEvent(type, { countInput = true } = {}) {
+async function handleEvent(type, { countInput = true, nativeRecovery = false, startFromIdle = false } = {}) {
   if (shuttingDown) return { ok: false, reason: "shutting_down", state: machine, actions: [] };
-  if (controlRecovery) return { ok: false, reason: "native_input_unavailable", state: machine, actions: [] };
+  if (controlRecovery || (nativeInputRecovery && !nativeRecovery)) return { ok: false, reason: "native_input_unavailable", state: machine, actions: [] };
   if (manualEnterInFlight && type !== "CANCEL") return { ok: false, reason: "manual_enter_busy", state: machine, actions: [] };
   if (countInput) {
     audit("input", { route: routeFor(type) }, { id: randomUUID(), status: "started" });
@@ -745,6 +889,12 @@ async function handleEvent(type, { countInput = true } = {}) {
       metrics.lastButtonRoute = type === "BUTTON_SEND_TAP" ? "front" : "back";
       metrics.lastButtonAt = Date.now();
     }
+  }
+
+  if (startFromIdle && isToggleEvent(type) && machine.mode === "idle") {
+    // Physical idle-down starts a fresh recording even if the legacy PTT API
+    // left a pending submission. Direct legacy requests keep their old meaning.
+    machine = { ...machine, pendingEnterAfterPtt: false };
   }
 
   if (type === "CANCEL") {
@@ -767,7 +917,7 @@ async function handleEvent(type, { countInput = true } = {}) {
   // the Fn-down has not happened yet. Invalidate that start and reset the
   // machine without manufacturing a stop/settle cycle for a recording that
   // never began.
-  if (pendingStartCapture && (isToggleEvent(type) || type === "BUTTON2_UP")) {
+  if (pendingStartCapture && (isToggleEvent(type) || type === "BUTTON2_UP" || type === "BUTTON_HELD_RELEASE")) {
     inputGeneration++;
     pendingStartCapture = null;
     cancelPasteGateRun();
@@ -886,7 +1036,7 @@ const server = createServer(async (req, res) => {
         toggleMode: TOGGLE_MODE,
         autoSubmit: AUTO_SUBMIT,
         shortClickMs: 350,
-        followupEnterWindowMs: 8000,
+        clickMode: "state", initialDraftSend: "recognized_send_control",
         autoEnterApps: AUTO_ENTER_APPS,
         autoEnterTitles: AUTO_ENTER_TITLES,
       },

@@ -154,6 +154,9 @@ export class VerifiedPasteGate {
     this.enteringTokens = new Set();
     this.activeToken = null;
     this.consumedTokens = new Set();
+    this.initialAttemptedTokens = new Set();
+    this.initialPostedTokens = new Set();
+    this.initialRebaseReady = new Map();
     this.generation = 0;
     // Closing is terminal for this client. Set this before waiting for the
     // child so a late request cannot respawn a helper during shutdown.
@@ -203,7 +206,11 @@ export class VerifiedPasteGate {
       if (!response || !Number.isInteger(response.id)) continue;
       const pending = this.pending.get(response.id);
       if (!pending) continue;
-      if (response.token !== pending.token || response.op !== pending.op) {
+      const initial = pending.op === "initial_enter_and_rebase";
+      const invalidInitial = initial && (typeof response.posted !== "boolean" ||
+        typeof response.rebaseReady !== "boolean" || typeof response.reason !== "string" ||
+        (response.ok === true && response.rebaseReady !== true));
+      if (response.token !== pending.token || response.op !== pending.op || invalidInitial) {
         this.pending.delete(response.id);
         clearTimeout(pending.timer);
         pending.signal?.removeEventListener("abort", pending.onAbort);
@@ -216,7 +223,8 @@ export class VerifiedPasteGate {
       pending.signal?.removeEventListener("abort", pending.onAbort);
       pending.resolve({
         ok: response.ok === true,
-        reason: response.ok === true ? "verified" : (typeof response.reason === "string" ? response.reason : "helper_rejected"),
+        reason: initial ? response.reason : response.ok === true ? "verified" : (typeof response.reason === "string" ? response.reason : "helper_rejected"),
+        ...(initial ? { posted: response.posted, rebaseReady: response.rebaseReady } : {}),
       });
     }
   }
@@ -333,6 +341,7 @@ export class VerifiedPasteGate {
   async capture({ token, signal } = {}) {
     if (typeof token !== "string" || token.length === 0) return genericFailure("missing_token");
     if (this.consumedTokens.has(token)) return genericFailure("already_consumed");
+    if (this.initialAttemptedTokens.has(token)) return genericFailure("initial_already_attempted");
     if (this.activeToken && this.activeToken !== token) this._invalidateProcess();
     this.activeToken = token;
     const result = await this._request("capture", token, {}, { signal });
@@ -340,10 +349,38 @@ export class VerifiedPasteGate {
     return result;
   }
 
+  /** Send only the exact original draft and rebase the same active token.
+   * posted:null denotes an unconfirmed transport outcome, never retry it.
+   * This operation does not consume the later transcript Enter capability.
+   */
+  async initialEnterAndRebase({ token, signal } = {}) {
+    const rejected = (reason) => ({ ok: false, reason, posted: false,
+      rebaseReady: this.activeToken === token && this.initialRebaseReady.get(token) !== false });
+    if (this.activeToken !== token) return rejected("stale_run");
+    if (this.consumedTokens.has(token)) return rejected("already_consumed");
+    if (this.enteringTokens.has(token)) return rejected("enter_in_progress");
+    if (this.initialAttemptedTokens.has(token)) return rejected("initial_already_attempted");
+    if (signal?.aborted) return rejected("aborted");
+    this.initialAttemptedTokens.add(token);
+    this.initialRebaseReady.set(token, false);
+    this.enteringTokens.add(token);
+    try {
+      const result = await this._request("initial_enter_and_rebase", token,
+        { timeoutMs: 1000 }, { signal, timeoutMs: 1000 + this.commandTimeoutMs });
+      if (result.posted === true) this.initialPostedTokens.add(token);
+      this.initialRebaseReady.set(token, result.rebaseReady === true);
+      return { ...result, posted: typeof result.posted === "boolean" ? result.posted : null,
+        rebaseReady: result.rebaseReady === true };
+    } finally {
+      this.enteringTokens.delete(token);
+    }
+  }
+
   async verifyAndEnter({ token, expectedText, signal } = {}) {
     if (this.activeToken !== token) return genericFailure("stale_run");
     if (this.consumedTokens.has(token)) return genericFailure("already_consumed");
     if (this.enteringTokens.has(token)) return genericFailure("enter_in_progress");
+    if (this.initialAttemptedTokens.has(token) && this.initialRebaseReady.get(token) !== true) return genericFailure("initial_rebase_unavailable");
     if (typeof expectedText !== "string" || expectedText.length === 0) return genericFailure("missing_expected_text");
     this.enteringTokens.add(token);
     try {
@@ -369,6 +406,7 @@ export class VerifiedPasteGate {
     if (this.activeToken !== token) return genericFailure("stale_run");
     if (this.consumedTokens.has(token)) return genericFailure("already_consumed");
     if (this.enteringTokens.has(token)) return genericFailure("enter_in_progress");
+    if (this.initialAttemptedTokens.has(token) && this.initialRebaseReady.get(token) !== true) return genericFailure("initial_rebase_unavailable");
     this.enteringTokens.add(token);
     try {
       const result = await this._request("manual_enter", token, {}, { signal });
@@ -377,6 +415,20 @@ export class VerifiedPasteGate {
     } finally {
       this.enteringTokens.delete(token);
     }
+  }
+
+  /**
+   * Release a completed one-shot without terminating its event sender.
+   * postToPid acknowledges posting, not target delivery; successful completion
+   * must not immediately destroy the sender's WindowServer connection.
+   * An unconfirmed/in-flight operation can only be cancelled, never released.
+   */
+  releaseConsumed({ token } = {}) {
+    if (this.closed || this.activeToken !== token ||
+        (!this.consumedTokens.has(token) && !this.initialPostedTokens.has(token)) ||
+        this.enteringTokens.has(token) || this.pending.size > 0 || !this.child) return false;
+    this.activeToken = null;
+    return true;
   }
 
   /** Synchronous invalidation prevents a late helper response from emitting. */

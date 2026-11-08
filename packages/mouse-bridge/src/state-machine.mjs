@@ -78,6 +78,15 @@ export function reduce(state, event) {
       return { state: next, actions };
     }
 
+    case "BUTTON_HELD_RELEASE": {
+      if (next.mode !== Mode.TOGGLE_RECORDING) return { state: next, actions };
+      next.mode = Mode.WAITING_SETTLE;
+      next.settleReason = "held_release";
+      next.pendingEnterAfterPtt = false;
+      actions.push("TOGGLE_STOP", "WAIT_SETTLE", "ENTER_NONE");
+      return { state: next, actions };
+    }
+
     case "BUTTON2_DOWN": {
       if (next.mode === Mode.TOGGLE_RECORDING || next.mode === Mode.WAITING_SETTLE) {
         return { state: next, actions };

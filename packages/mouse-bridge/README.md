@@ -5,28 +5,39 @@ small Swift event-tap child; G HUB does not need to run.
 
 | Physical button | Action |
 | --- | --- |
-| Front / G5 | Click to start, click to stop; send Return only after the completed transcript is proven in the original field. |
-| Back / G4 | Click to start, click to stop; insert text without Return. |
+| Front / G5 | While recording, down stops and requests Return after exact transcript proof. |
+| Back / G4 | While recording, down stops and inserts the transcript without automatic Return. |
 
-After recording stops, the native route also accepts explicit short follow-up
-clicks on **either** side button. During processing, or within eight seconds of
-the last stop, a complete down/up pair of at most 350 ms requests one manual
-Return instead of restarting Aqua. Longer holds do nothing in this follow-up
-state. Once the window expires, an idle press starts a new recording.
+Both buttons start recording immediately on **down** while idle: destination
+capture and Fn control begin without waiting for release. A short release
+(less than 350 ms) can additionally send the exact original draft once, but only
+when a recognized nearby Send control is ready. An empty original field needs
+no initial Return. After a posted initial Return, the same field must become
+empty with its cursor at zero before it can be the transcript baseline. The
+same proof token remains active for the recording. Unknown posting, a changed
+destination or failed rebase prevents later transcript Return; a rejected,
+unposted initial send can retain a proven unchanged baseline.
+
+A starting press held for at least 350 ms stops its own recording on release,
+without initial or final automatic Return. While a transcript is processing,
+a short complete click on either button requests submission of **that pending
+transcript**, after its original completion and exact paste proof. It neither
+sends old field text nor restarts Aqua. Overlapping requests share one pending
+submission. Longer processing holds do not request Return. Once idle, the next
+down starts a new recording; there is no post-stop time window.
 
 The button used to **stop** selects the action. A back-button stop also prevents
 Return after a front-button start. Aqua inserts at the cursor itself; no manual
-paste is needed. `AQUA_AUTO_SUBMIT=0` suppresses every automatic Return.
+paste is needed. `AQUA_AUTO_SUBMIT=0` suppresses initial-draft, automatic and
+explicit manual Return while leaving recording controls available.
 
-Each manual Return requires a new click, a nonempty focused editable field and
-a collapsed cursor. The native helper captures the current destination and
-revalidates process, window, field, text and selection immediately before
-posting. An explicit manual request does not wait for an Aqua transcript. It
-cancels deferred automatic submission; an automatic Return already in flight
-or landing during the click consumes that click without a second key. No timer
-emits Return, and manual submission never releases Fn or toggles Aqua.
-`AQUA_AUTO_SUBMIT=0` also disables manual Return. The back recording stop remains
-text-only; a later explicit short click can request Return.
+An automatic transcript Return already in flight, or completed during a short
+processing click, consumes the click without a second key. This check uses the
+automatic transcript counter separately from initial-draft and manual posting
+counts. The separate fresh-field manual proof path requires a nonempty focused
+editable field, collapsed cursor and stable process, window, field, text and
+selection. It cancels deferred submission without issuing Fn commands. No
+timer emits Return.
 
 ## Install
 
@@ -69,6 +80,9 @@ curl --fail -X POST http://127.0.0.1:8690/button/front
 curl --fail -X POST http://127.0.0.1:8690/button/back
 ```
 
+These HTTP routes retain their existing toggle behavior. They do not represent
+native down/up pairs, short releases or held releases.
+
 Choose one physical dispatcher. Running a second mapper can cause duplicate
 actions even when its assignment looks equivalent.
 
@@ -77,6 +91,9 @@ actions even when its assignment looks equivalent.
 1. Before Fn-down, a persistent native helper captures the front process,
    window, editable field, value and UTF-16 selection. It uses the application
    accessibility interface; field text stays in helper memory.
+   A short idle-start release may make one initial-draft request against this
+   exact capture. A posted draft requires the same-field empty/cursor-zero
+   rebase described above; the later transcript uses that rebased capture.
 2. After recording stops, the history reader requires exactly one new,
    nonempty transcription relative to both recording and stop baselines. It
    supports legacy `historyByUserId` and current `accounts/*/history.json`
@@ -108,6 +125,11 @@ cannot silently switch to a second writer. Recovery releases a possibly held
 Fn before a replacement child becomes ready. The paste helper is prewarmed
 without reading any field until recording starts. Aqua's own recognition time
 is separate from input-control and paste-proof timing.
+Losing the mouse tap invalidates pending click work and releases the bridge's
+own Fn hold. After confirmed posting, normal token completion uses
+`releaseConsumed` where applicable to keep the native sender's event connection
+alive; successful initial rebase does not end the recording token. Cancellation,
+unknown outcomes and shutdown retain their hard invalidation paths.
 
 ## Local live test window
 
@@ -120,6 +142,8 @@ monitor observes the existing bridge and watcher; it never sends recording or
 keyboard commands. It shows the native hook, Fn acknowledgement, CoreAudio
 confirmation and independent Enter-down/up receipt in local test fields.
 Status refreshes every 250 ms with a bounded shared upstream cache.
+The metadata whitelist includes separate `autoEnterCount`, `initialEnterCount`
+and `initialEnterAttempts` counters; none alone proves target delivery.
 
 The recording request is displayed separately from confirmed CoreAudio
 activity. A command-to-confirmation time is measured only for a new live intent
@@ -187,6 +211,10 @@ Return after proof; the receiving application's submission remains a separate
 observation.
 `manualEnterAttempts` and `manualEnterCount` distinguish explicit manual
 requests from posted manual keys. These counters do not establish delivery.
+`autoEnterCount` counts posted final transcript Returns;
+`initialEnterAttempts` and `initialEnterCount` count initial-draft attempts and
+confirmed postings separately. `config.clickMode` is `state`, and
+`config.initialDraftSend` is `recognized_send_control`.
 
 The automated tests exercise state transitions, retained-history rollover,
 source binding, helper failure/cancellation, protocol validation and child
@@ -196,9 +224,11 @@ real Aqua transcription and independent Return receipt is still pending.**
 Use a harmless local input field with a Return counter: front stop must produce
 exactly one Return; back stop must produce none; changing focus must suppress
 Return. A missing proof must stay visibly incomplete.
-The short-click path additionally needs physical checks of manual follow-ups
-on both buttons, long holds, an expired follow-up window, and an automatic
-Return arriving during a click. Those checks remain pending.
+The native click path additionally needs physical checks on both buttons of
+immediate idle-down start, short-release initial draft and same-field rebase,
+held-release stop, processing submission, automatic Return overlap and tap-loss
+Fn cleanup. Those checks remain pending. The final publication regression run
+and its test count must be recorded separately from these hardware checks.
 
 The native hook is a child of the bridge and is stopped during bridge shutdown.
 It does not synthesize side-button events and does not claim that event source

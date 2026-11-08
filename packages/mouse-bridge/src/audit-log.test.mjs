@@ -193,3 +193,17 @@ test("rotation refuses a symlink backup without changing its target", async () =
     assert.equal(audit.status().lastError, "audit_io_failed");
   } finally { await audit.close(); await rm(dir, { recursive: true, force: true }); }
 });
+
+test('initial Enter audit preserves fixed reasons and never claims delivery', () => {
+  assert.deepEqual(sanitizeAuditEvent({ eventType: 'initial_rebase', reason: 'initial_empty', status: 'ready' }), {
+    eventType: 'initial_rebase', reason: 'initial_empty', status: 'ready',
+  });
+  assert.deepEqual(sanitizeAuditEvent({ eventType: 'enter_emitted', reason: 'initial_posted', delivery: 'confirmed' }), {
+    eventType: 'enter_emitted', reason: 'initial_posted', status: 'posted', delivery: 'not_proven',
+  });
+  for (const reason of ['initial_enter', 'initial_empty', 'initial_rebased', 'initial_rebase_failed',
+    'no_send_control', 'draft_changed', 'caret_changed', 'rebase_timeout', 'rebase_unexpected_value']) {
+    assert.equal(sanitizeReasonCode(reason), reason);
+  }
+  assert.equal(sanitizeReasonCode('initial_posted private draft'), null);
+});

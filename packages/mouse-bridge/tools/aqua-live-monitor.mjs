@@ -31,7 +31,8 @@ const PROOF_REASONS = new Set([
 ]);
 const METRIC_NUMBERS = [
   "startTime", "totalToggles", "totalPtt", "frontTaps", "backTaps", "lastButtonAt", "settleCount", "timeoutCount",
-  "lastLatencyMs", "totalLatencyMs", "avgLatencyMs", "enterCount", "lastEnterAt", "lastStopToEnterMs", "lastPostSettleToEnterMs",
+  "lastLatencyMs", "totalLatencyMs", "avgLatencyMs", "enterCount", "autoEnterCount", "initialEnterCount", "initialEnterAttempts",
+  "lastEnterAt", "lastStopToEnterMs", "lastPostSettleToEnterMs",
   "lastCaptureMs", "lastStartControlMs", "manualEnterCount", "manualEnterAttempts", "lastProofMs", "uptimeSec",
 ];
 const NATIVE_NUMBERS = [

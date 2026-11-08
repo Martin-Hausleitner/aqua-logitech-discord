@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 const EVENT_TYPES = new Set([
-  "input", "capture", "fn_start", "fn_stop", "settle", "paste_verified",
+  "input", "capture", "initial_rebase", "fn_start", "fn_stop", "settle", "paste_verified",
   "enter_emitted", "suppressed", "fault",
 ]);
 const ROUTES = new Set(["front", "back", "legacy"]);
@@ -14,6 +14,8 @@ const STATUSES = new Set([
   "threshold_pending", "duplicate", "dropped", "closed", "ready", "unavailable", "cancelled",
 ]);
 const REASONS = new Set([
+  "initial_enter", "initial_posted", "initial_empty", "initial_rebased", "initial_rebase_failed",
+  "no_send_control", "draft_changed", "caret_changed", "rebase_timeout", "rebase_unexpected_value",
   "manual_enter", "manual_posted", "send_not_ready", "send_context_lost", "empty_field", "helper_still_stopping", "enter_in_progress",
   "ok", "verified", "posted", "delivery_not_proven", "history_ts", "history", "clipboard",
   "helper_unavailable", "helper_error", "helper_exit", "helper_stdin_error", "helper_protocol",

@@ -108,3 +108,22 @@ test("front can submit a deferred PTT paste while either toggle is ignored durin
   r = reduce(r.state, { type: "BUTTON_SEND_TAP" });
   assert.deepEqual(r.actions, ["WAIT_SETTLE", "ENTER_FORCE"]);
 });
+
+test('held side-button release stops toggle recording without automatic Enter', () => {
+  for (const start of ['BUTTON_SEND_TAP', 'BUTTON_DICTATE_TAP']) {
+    const started = reduce(createMachine(), { type: start });
+    const stopped = reduce(started.state, { type: 'BUTTON_HELD_RELEASE' });
+    assert.equal(stopped.state.mode, Mode.WAITING_SETTLE);
+    assert.equal(stopped.state.settleReason, 'held_release');
+    assert.deepEqual(stopped.actions, ['TOGGLE_STOP', 'WAIT_SETTLE', 'ENTER_NONE']);
+    assert.deepEqual(reduce(stopped.state, { type: 'BUTTON_HELD_RELEASE' }).actions, []);
+  }
+});
+
+test('held side-button release never starts an idle run or releases legacy PTT', () => {
+  for (const mode of [Mode.IDLE, Mode.PTT_HOLDING, Mode.WAITING_SETTLE]) {
+    const result = reduce({ ...createMachine(), mode }, { type: 'BUTTON_HELD_RELEASE' });
+    assert.equal(result.state.mode, mode);
+    assert.deepEqual(result.actions, []);
+  }
+});
