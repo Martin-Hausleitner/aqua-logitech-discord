@@ -47,5 +47,7 @@
 - [x] Run the receiver's 11 separate Foundation/filesystem checks in the publication candidate, including focus/repeat/key-pair regressions, receipt failure and private atomic replacement.
 - [x] Compile byte-identical receiver sources in isolated task work without launching, installing or registering the app as part of that build; preserve the single later owner-launched test instance.
 - [x] Independently verify the copied receiver scope and publication privacy/ignore rules: exactly nine allowed files, matching frozen source bytes, private build/status/temp outputs ignored, no production changes.
-- [ ] Observe an owner-controlled live receiver submission with actual Return receipt and same-field empty/cursor-zero rebase; missing-focus or zero-Enter attempts remain incomplete.
+- [x] Observe three bounded owner-controlled synthetic short-start initial submissions in the local receiver: one received Return pair and local submission per case, with the same field empty/cursor-zero and initial rebase confirmed. This establishes only these local cases, not repeated reliability or final transcript delivery.
+- [x] Observe one approximately 600-ms synthetic held press start and stop without an additional initial submission or Return; this is a local pipeline observation, not a physical hold test.
+- [ ] Explain the earlier initial AX/rebase `focus_missing` failure and the later missing simulated stop-up, then verify reliable repetition; separate owned release cleanup does not establish the cause or close this requirement.
 - [ ] Retain all original physical mouse, speech, first-word, latency and browser/Electron/Codex acceptance requirements regardless of isolated receiver results.

@@ -170,7 +170,7 @@ bash tools/native-receiver/build.sh
 Run these commands from this package directory. They run separate Foundation/
 filesystem checks and build `tools/native-receiver/Aqua Input Receiver.app`;
 they never launch, install or register the GUI app. The 11 receiver checks are
-separate from the existing 334 Node package tests.
+separate from the existing 337 Node package tests.
 
 The receiver uses bundle ID `org.aqua.acceptance.receiver` and window title
 `Aqua – Native Eingabeprüfung`. One normal NSTextView marked
@@ -197,8 +197,17 @@ verification. Stop the receiver after the owned probe.
 Compilation and model checks prove neither live key delivery nor physical
 mouse/speech behavior. A receiver probe also does not establish existing
 browser/Electron/Codex compatibility or preservation of the first spoken words.
-Those original acceptance checks remain open. No successful live receiver
-submission is claimed by the preparation steps above.
+Those original acceptance checks remain open.
+
+Limited local probes have delivered three successful synthetic short-start
+initial submissions, each with one received Return pair, one local submission
+and the same field rebased empty with cursor zero. One approximately 600-ms
+synthetic hold also completed without an additional Return. These observations
+do not establish repeated reliability: an earlier initial AX/rebase attempt
+failed with `focus_missing`, and a later simulated stop-up was not received by
+the bridge. The latter required separate owned release cleanup; its cause
+remains unresolved. None of these probes establishes physical mouse, real
+speech, first-word or browser/Electron/Codex acceptance.
 
 ## Audit and optional automatic repair
 
