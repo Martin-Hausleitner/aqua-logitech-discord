@@ -151,6 +151,7 @@ export class VerifiedPasteGate {
     this.nextId = 0;
     this.pending = new Map();
     this.retiringChildren = new Map();
+    this.idleWarmRequest = null;
     this.enteringTokens = new Set();
     this.activeToken = null;
     this.consumedTokens = new Set();
@@ -188,6 +189,30 @@ export class VerifiedPasteGate {
 
   /** Prewarm only the process and pipes; no AX request or key is sent. */
   warm() { return this._ensureChild() != null; }
+
+  /** One process-only idle preparation, never a capture or an input request. */
+  warmWhenIdle({ isIdle = () => true } = {}) {
+    const generation = this.generation;
+    const allowed = () => {
+      try {
+        return !this.closed && this.generation === generation && this.activeToken == null &&
+          this.pending.size === 0 && this.enteringTokens.size === 0 && isIdle() === true;
+      } catch { return false; }
+    };
+    if (!allowed()) return Promise.resolve(false);
+    if (this.idleWarmRequest?.generation === generation) return this.idleWarmRequest.promise;
+    const request = { generation, promise: null };
+    request.promise = Promise.resolve().then(async () => {
+      // SIGKILL is not termination evidence. Reuse the same barrier as capture
+      // and revalidate admission after it yields to a new start/cancel/close.
+      if (!(await this._waitForRetirement()) || !allowed()) return false;
+      return this.warm();
+    }).catch(() => false).finally(() => {
+      if (this.idleWarmRequest === request) this.idleWarmRequest = null;
+    });
+    this.idleWarmRequest = request;
+    return request.promise;
+  }
 
   _onData(chunk) {
     this.buffer += String(chunk);

@@ -55,9 +55,16 @@
 ## 5. Autonomous synthetic input and audio validation
 
 - [x] Implement and independently regression-test passive marked input receipts with actual source-process metadata, canonical marker, mapped ordered pair and child lifecycle, preserving ordinary routing and proof/control behavior: 35 fake-child Node tests and 15 separate pure Swift metadata checks passed; live receipt acceptance remains separate.
-- [ ] Independently review and test the asynchronous sender/driver acknowledgment protocol, one-up bound, negative cases and exclusive runtime/raw-counter correlation before live input.
-- [ ] Observe bounded short and held synthetic cases for both buttons, with rear final automatic Return suppressed and independent receiver counts.
+- [x] Independently review and test the asynchronous sender/driver acknowledgment protocol, one-up bound, negative cases and exclusive runtime/raw-counter correlation before live input: 25 isolated driver model tests and 1344 separate pure helper-policy assertions passed.
+- [x] Observe four bounded silent synthetic cases: short start/stop and held release for both buttons. All six native pairs received their exact delivery acknowledgment, CoreAudio on/off was observed in every case, no additional Return or local submission occurred, and each own run returned idle after separately recorded silent-run cleanup. These are synthetic pipeline cases, not speech or physical acceptance.
 - [ ] Use the already installed digital audio loop for real Aqua test-sentence transcription, insertion and front/rear Return checks only after validating target and audio quiescence.
 - [ ] Verify pending-transcript follow-up clicks, overlap, focus/cancel and phase timing from actual receipts; leave unobserved cases open.
 - [ ] Restore and verify both original application microphone selections and unchanged system audio defaults after digital-audio tests.
 - [ ] Retain separate digital test-signal, fixture, physical mouse, natural first-word and browser/Electron/Codex evidence scopes.
+
+## 6. Proof-client idle preparation
+
+- [x] Specify generation-bound process-only idle preparation behind confirmed retirement and normal automatic consumed-token release, without changing proof, Fn ordering or hard cancellation.
+- [x] Independently review the frozen two-source/two-test candidate and run nine targeted fake-child/controller regressions; source and patch hashes remain unchanged.
+- [ ] Run the full publication package suite on the transferred candidate, including existing native composer checks.
+- [ ] Let the sole runtime owner deploy after baseline speech validation and measure subsequent capture/control phases without claiming unmeasured savings.

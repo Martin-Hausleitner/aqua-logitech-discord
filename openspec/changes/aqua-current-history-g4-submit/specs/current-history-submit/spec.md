@@ -255,8 +255,26 @@ and SHALL remain cancellable on shutdown, user cancellation or input loss.
 
 #### Scenario: Successful native sender is released
 
-- **WHEN** a manual or initial Return has confirmed posting and the run reaches normal token completion with no proof operation in flight
+- **WHEN** a manual, initial or automatic transcript Return has confirmed posting and the run reaches normal token completion with no proof operation in flight
 - **THEN** completion MAY use `releaseConsumed` to retain its native sender until process exit instead of immediately killing its event connection; initial rebase alone SHALL NOT release the active token
+
+### Requirement: Process-only idle preparation
+
+The existing proof client MAY prepare its next process during idle without
+reading AX or sending a request. It SHALL wait for confirmed previous-process
+retirement and recheck shutdown, generation, active token, pending operations
+and controller idle state. A new capture or generation SHALL supersede stale
+preparation. Cancellation SHALL retain synchronous hard invalidation.
+
+#### Scenario: Retiring process
+
+- **WHEN** a cancelled proof child has not yet confirmed exit
+- **THEN** idle preparation waits behind the existing retirement barrier and creates no second sender
+
+#### Scenario: Capture or shutdown overtakes preparation
+
+- **WHEN** a recording start, new generation or shutdown occurs during idle preparation
+- **THEN** the stale preparation cannot create another child or issue an AX request
 
 #### Scenario: Focus changes during manual proof
 
