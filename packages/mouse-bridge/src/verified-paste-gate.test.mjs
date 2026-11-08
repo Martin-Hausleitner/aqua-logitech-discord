@@ -695,3 +695,124 @@ test("replacement of an unconfirmed Enter still kills the old sender before capt
   assert.equal(gate.activeToken, "replacement");
   await gate.close();
 });
+
+function idleWarmHarness() {
+  const children = [];
+  const gate = new VerifiedPasteGate({
+    binary: "/synthetic/verified-paste-gate",
+    commandTimeoutMs: 20,
+    spawnImpl: () => {
+      const child = new FakeChild();
+      child.writes = [];
+      const write = child.stdin.write;
+      child.stdin.write = (line) => { child.writes.push(JSON.parse(line)); write(line); };
+      children.push(child);
+      return child;
+    },
+  });
+  return { gate, children };
+}
+
+test("idle warm: coalesces until confirmed exit and sends no AX request", async () => {
+  const { gate, children } = idleWarmHarness();
+  await gate.capture({ token: "old" });
+  children[0].kill = () => {};
+  gate.cancel({ token: "old" });
+  try {
+    const first = gate.warmWhenIdle();
+    const second = gate.warmWhenIdle();
+    assert.equal(first, second, "one outstanding warm request per generation");
+    await new Promise(setImmediate);
+    assert.equal(children.length, 1);
+    children[0].emit("exit", null, "SIGKILL");
+    assert.equal(await first, true);
+    assert.equal(children.length, 2);
+    assert.deepEqual(children[1].writes, []);
+    assert.equal(await gate.warmWhenIdle(), true);
+    assert.equal(children.length, 2);
+  } finally { children[0].emit("exit", null, "SIGKILL"); await gate.close(); }
+});
+
+test("idle warm: a fresh capture owns the only replacement while retirement is pending", async () => {
+  const { gate, children } = idleWarmHarness();
+  await gate.capture({ token: "old" });
+  children[0].kill = () => {};
+  gate.cancel({ token: "old" });
+  try {
+    const warming = gate.warmWhenIdle();
+    const capture = gate.capture({ token: "new" });
+    children[0].emit("exit", null, "SIGKILL");
+    assert.equal(await warming, false);
+    assert.equal((await capture).ok, true);
+    assert.equal(children.length, 2);
+    assert.deepEqual(children[1].writes.map(({ op }) => op), ["capture"]);
+    assert.equal(gate.activeToken, "new");
+  } finally { children[0].emit("exit", null, "SIGKILL"); await gate.close(); }
+});
+
+test("idle warm: newer cancellation supersedes the old generation without a retry loop", async () => {
+  const { gate, children } = idleWarmHarness();
+  await gate.capture({ token: "old" });
+  children[0].kill = () => {};
+  gate.cancel({ token: "old" });
+  try {
+    const stale = gate.warmWhenIdle();
+    gate.cancel();
+    const current = gate.warmWhenIdle();
+    assert.notEqual(stale, current);
+    children[0].emit("exit", null, "SIGKILL");
+    assert.equal(await stale, false);
+    assert.equal(await current, true);
+    assert.equal(children.length, 2);
+    assert.deepEqual(children[1].writes, []);
+  } finally { children[0].emit("exit", null, "SIGKILL"); await gate.close(); }
+});
+
+test("idle warm: controller admission is rechecked after retirement", async () => {
+  const { gate, children } = idleWarmHarness();
+  await gate.capture({ token: "old" });
+  children[0].kill = () => {};
+  gate.cancel({ token: "old" });
+  let idle = true;
+  try {
+    const warming = gate.warmWhenIdle({ isIdle: () => idle });
+    idle = false;
+    children[0].emit("exit", null, "SIGKILL");
+    assert.equal(await warming, false);
+    assert.equal(children.length, 1);
+    assert.equal(await gate.warmWhenIdle({ isIdle: () => { throw Error("admission unavailable"); } }), false);
+    assert.equal(children.length, 1);
+  } finally { children[0].emit("exit", null, "SIGKILL"); await gate.close(); }
+});
+
+test("idle warm: close is terminal even while retirement is pending", async () => {
+  const { gate, children } = idleWarmHarness();
+  await gate.capture({ token: "old" });
+  children[0].kill = () => {};
+  gate.cancel({ token: "old" });
+  try {
+    const warming = gate.warmWhenIdle();
+    const closed = gate.close();
+    children[0].emit("exit", null, "SIGKILL");
+    assert.equal(await warming, false);
+    await closed;
+    assert.equal(await gate.warmWhenIdle(), false);
+    assert.equal(children.length, 1);
+  } finally { children[0].emit("exit", null, "SIGKILL"); await gate.close(); }
+});
+
+test("idle warm: active token and unconfirmed retirement never admit background spawn", async () => {
+  const { gate, children } = idleWarmHarness();
+  await gate.capture({ token: "active" });
+  try {
+    assert.equal(await gate.warmWhenIdle(), false);
+    assert.equal(children.length, 1);
+    children[0].kill = () => {};
+    gate.cancel({ token: "active" });
+    assert.equal(await gate.warmWhenIdle(), false);
+    assert.equal(children.length, 1);
+    children[0].emit("exit", null, "SIGKILL");
+    await new Promise(setImmediate);
+    assert.equal(children.length, 1, "late exit does not restart a timed-out idle request");
+  } finally { children[0].emit("exit", null, "SIGKILL"); await gate.close(); }
+});

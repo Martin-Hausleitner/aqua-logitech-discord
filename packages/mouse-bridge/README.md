@@ -131,6 +131,14 @@ own Fn hold. After confirmed posting, normal token completion uses
 alive; successful initial rebase does not end the recording token. Cancellation,
 unknown outcomes and shutdown retain their hard invalidation paths.
 
+Normal automatic transcript success also releases its consumed token while
+retaining the known sender for the next capture. After hard cancellation, idle
+preparation waits for confirmed child retirement and rechecks generation,
+shutdown, active work and controller state. It prepares only the process and
+pipes, without an AX request or input; a new capture supersedes stale warming.
+This removes an avoidable process restart from those paths. Any latency gain
+requires measurement separately from AX work and Aqua/CoreAudio startup.
+
 ## Correlated synthetic input diagnostics
 
 The same native child can retain `nativeMouse.lastTestPair` for deliberately
@@ -185,7 +193,7 @@ bash tools/native-receiver/build.sh
 Run these commands from this package directory. They run separate Foundation/
 filesystem checks and build `tools/native-receiver/Aqua Input Receiver.app`;
 they never launch, install or register the GUI app. The 11 receiver checks are
-separate from the existing 346 Node package tests.
+separate from the existing 355 Node package tests.
 
 The receiver uses bundle ID `org.aqua.acceptance.receiver` and window title
 `Aqua – Native Eingabeprüfung`. One normal NSTextView marked
@@ -223,6 +231,14 @@ failed with `focus_missing`, and a later simulated stop-up was not received by
 the bridge. The latter required separate owned release cleanup; its cause
 remains unresolved. None of these probes establishes physical mouse, real
 speech, first-word or browser/Electron/Codex acceptance.
+
+A later four-case silent matrix checked short start/stop and held release on
+both buttons using exact correlated native delivery receipts. All six pairs
+were acknowledged, CoreAudio activity went on and off in each case, and no
+additional Return or local submission occurred. Each case used separately
+recorded cleanup of its own silent run and ended idle. This establishes those
+bounded synthetic pipeline observations; transcript and speech checks remain
+separate.
 
 ## Audit and optional automatic repair
 

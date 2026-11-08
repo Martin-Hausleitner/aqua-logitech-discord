@@ -564,6 +564,16 @@ function finishPasteGateRun(run) {
   cancelPasteGateRun(run);
 }
 
+function warmPasteGateIfIdle() {
+  const generation = inputGeneration;
+  const isIdle = () => generation === inputGeneration && !shuttingDown && !controlRecovery &&
+    !nativeInputRecovery && machine.mode === "idle" && !busy && !pendingRestart &&
+    !activeRun && !pendingStartCapture && !activePasteGateRun && !autoEnterInFlight && !manualEnterInFlight;
+  if (!isIdle()) return;
+  // Optional process preparation cannot affect recording or proof outcomes.
+  void verifiedPasteGate?.warmWhenIdle?.({ isIdle })?.catch(() => {});
+}
+
 function beginShutdown() {
   if (shutdownPromise) return shutdownPromise;
   // Close admission before awaiting the helper. A new event must not be able
@@ -821,6 +831,7 @@ async function runActions(actions) {
               audit("paste_verified", auditContext, { status: "ok", reason: "verified", durationMs: metrics.lastProofMs });
               audit("enter_emitted", auditContext, { reason: "posted",
                 durationMs: stopRequestedAt == null ? undefined : Date.now() - stopRequestedAt });
+              verifiedPasteGate.releaseConsumed?.({ token: pasteRun.token });
               if (activePasteGateRun === pasteRun) activePasteGateRun = null;
               if (!DRY) {
                 metrics.enterCount++;
@@ -922,6 +933,7 @@ async function handleEvent(type, { countInput = true, nativeRecovery = false, st
     pendingStartCapture = null;
     cancelPasteGateRun();
     machine = reduce(machine, { type: "CANCEL" }).state;
+    warmPasteGateIfIdle();
     return { ok: true, reason: "capture_cancelled", state: machine, actions: [] };
   }
 
@@ -984,6 +996,7 @@ async function handleEvent(type, { countInput = true, nativeRecovery = false, st
     const failure = await executeActions(actions);
     if (failure) return failure;
   }
+  warmPasteGateIfIdle();
   return { ok: true, state: machine, actions };
 }
 

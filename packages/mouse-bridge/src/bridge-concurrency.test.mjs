@@ -9,6 +9,8 @@ import { createMachine, reduce } from "./state-machine.mjs";
 import { shouldSubmit } from "./submit-policy.mjs";
 import { randomUUID } from "node:crypto";
 import { sanitizeAuditEvent, sanitizeReasonCode } from "./audit-log.mjs";
+import { VerifiedPasteGate } from "./verified-paste-gate.mjs";
+import { EventEmitter } from "node:events";
 
 const source = await readFile(join(dirname(fileURLToPath(import.meta.url)), "mouse-bridge.mjs"), "utf8");
 const nativeStatusCallback = source.match(/\n  onStatus: (\w+),/)?.[1];
@@ -138,6 +140,95 @@ function makeHarness(overrides = {}) {
   `, context);
   return { bridge: context.__bridge, hidCalls, settleCalls, gateCalls, nativeMouseCalls, auditEvents, repairEvents };
 }
+
+function idleWarmControllerGate() {
+  const children = [];
+  const gate = new VerifiedPasteGate({
+    binary: "/synthetic/verified-paste-gate",
+    commandTimeoutMs: 50,
+    spawnImpl: () => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stdin = new EventEmitter();
+      child.writes = [];
+      child.signals = [];
+      child.stdin.write = (line) => {
+        const request = JSON.parse(line);
+        child.writes.push(request);
+        queueMicrotask(() => child.stdout.emit("data", JSON.stringify({ ...request, ok: true }) + "\n"));
+      };
+      child.kill = (signal) => {
+        child.signals.push(signal);
+        queueMicrotask(() => child.emit("exit", null, signal));
+      };
+      children.push(child);
+      return child;
+    },
+  });
+  return { gate, children };
+}
+
+test("idle warm controller: automatic success releases consumed token and reuses its sender", async () => {
+  const { gate, children } = idleWarmControllerGate();
+  const { bridge, settleCalls } = makeHarness({ pasteGate: gate });
+  try {
+    await bridge.handleEvent("BUTTON_SEND_TAP");
+    const oldToken = gate.activeToken;
+    const stopped = bridge.handleEvent("BUTTON_SEND_TAP");
+    await waitFor(() => settleCalls.length === 1);
+    settleCalls[0].gate.resolve({ ok: true, reason: "history_ts", waitedMs: 1 });
+    await stopped;
+    assert.equal(gate.activeToken, null);
+    assert.equal(bridge.metrics().autoEnterCount, 1);
+    assert.equal(children.length, 1);
+    assert.deepEqual(children[0].signals, []);
+    assert.equal((await gate.manualEnter({ token: oldToken })).ok, false);
+    await bridge.handleEvent("BUTTON_SEND_TAP");
+    assert.equal(children.length, 1);
+    assert.deepEqual(children[0].writes.map(({ op }) => op), ["capture", "verify_and_enter", "capture"]);
+  } finally { await bridge.beginShutdown(); }
+});
+
+test("idle warm controller: normal rear completion preserves hard invalidation and warms without input", async () => {
+  const { gate, children } = idleWarmControllerGate();
+  const { bridge, settleCalls, hidCalls } = makeHarness({ pasteGate: gate });
+  try {
+    await bridge.handleEvent("BUTTON_DICTATE_TAP");
+    const stopped = bridge.handleEvent("BUTTON_DICTATE_TAP");
+    await waitFor(() => settleCalls.length === 1);
+    settleCalls[0].gate.resolve({ ok: true, reason: "history_ts", waitedMs: 1 });
+    await stopped;
+    await waitFor(() => children.length === 2);
+    assert.deepEqual(children[0].signals, ["SIGKILL"]);
+    assert.deepEqual(children[1].writes, []);
+    assert.deepEqual(hidCalls.map(([key]) => key), ["fn-down", "fn-up"]);
+    assert.equal(bridge.metrics().enterCount, 0);
+    assert.equal(bridge.state().mode, "idle");
+    assert.equal(bridge.state().busy, false);
+    await bridge.handleEvent("BUTTON_DICTATE_TAP");
+    assert.equal(children.length, 2);
+    assert.deepEqual(children[1].writes.map(({ op }) => op), ["capture"]);
+  } finally { await bridge.beginShutdown(); }
+});
+
+test("idle warm controller: a new start supersedes pending cancel warming", async () => {
+  const { gate, children } = idleWarmControllerGate();
+  const { bridge, hidCalls } = makeHarness({ pasteGate: gate });
+  try {
+    await bridge.handleEvent("BUTTON_DICTATE_TAP");
+    children[0].kill = (signal) => { children[0].signals.push(signal); };
+    await bridge.handleEvent("CANCEL");
+    assert.equal(children.length, 1);
+    const restarted = bridge.handleEvent("BUTTON_DICTATE_TAP");
+    children[0].emit("exit", null, "SIGKILL");
+    await restarted;
+    assert.equal(children.length, 2);
+    assert.deepEqual(children[1].writes.map(({ op }) => op), ["capture"]);
+    assert.equal(bridge.state().mode, "toggle_recording");
+    assert.equal(bridge.metrics().enterCount, 0);
+    assert.equal(hidCalls.filter(([key]) => key === "fn-down").length, 2);
+  } finally { children[0]?.emit("exit", null, "SIGKILL"); await bridge.beginShutdown(); }
+});
 
 test("old settle cannot clear or finish a newer run after cancel", async () => {
   const { bridge, hidCalls, settleCalls } = makeHarness();
