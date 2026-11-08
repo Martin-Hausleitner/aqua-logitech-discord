@@ -362,3 +362,57 @@ for physical mouse, speech, first-word or existing Electron/browser acceptance.
 
 - **WHEN** receiver model checks, compilation or a later simulated local probe succeed
 - **THEN** evidence identifies that limited scope and leaves missing real-input, speech, latency and browser/Codex requirements open
+
+### Requirement: Passive correlated synthetic input receipts
+
+The native path MAY retain bounded diagnostics for marked synthetic pairs.
+Each pair SHALL bind a canonical integer marker without number rounding, actual
+source process, mapped button, ordered native receive sequence and monotonic
+times, and current child generation. Complete accepted pairs SHALL remain
+readable after both edges arrive. Lifecycle loss SHALL invalidate old receipts.
+
+#### Scenario: Both edges arrive before polling
+
+- **WHEN** the current native child accepts both mapped edges of one marked pair before the diagnostic reader polls
+- **THEN** the retained complete receipt permits matching that pair without requiring adjacent sequence numbers or inferring delivery from a posting acknowledgment
+
+#### Scenario: Unmatched or stale receipt
+
+- **WHEN** marker, source process, button, edge order or child generation differs
+- **THEN** no matching complete diagnostic pair is created, and ordinary input semantics remain unchanged
+
+### Requirement: Passive diagnostic boundary
+
+Absent or invalid optional diagnostic metadata SHALL NOT change otherwise valid
+input routing. Synthetic receipts SHALL NOT authorize control, paste proof,
+repair, physical-origin claims or cleanup of an unproven recording owner.
+
+#### Scenario: Invalid optional metadata
+
+- **WHEN** a valid ordinary input carries absent or invalid diagnostic metadata
+- **THEN** ordinary input handling is preserved and no matching synthetic receipt is created
+
+### Requirement: Bounded autonomous test evidence
+
+The synthetic sender SHALL retain its event source until an exact bridge
+receipt or bounded monotonic deadline after its single up. Its asynchronous
+driver SHALL validate runtime, child generation, source process, fresh marker,
+expected raw counts and original target. Missing or ambiguous delivery SHALL
+fail without repeated up or unrelated cancel.
+
+#### Scenario: Lost or wrong acknowledgment
+
+- **WHEN** a synthetic sender receives no exact acknowledgment, a wrong one, parent loss or a timeout
+- **THEN** it reports unconfirmed delivery and emits no second up to manufacture a successful case
+
+### Requirement: Digital audio test boundaries
+
+Tests with an existing digital audio loop SHALL preserve system defaults and
+restore the previous application microphone selections. Real Aqua test-signal
+transcription SHALL require observed session completion and destination.
+Fixture, digital-audio and physical speech results SHALL remain distinct.
+
+#### Scenario: Temporary digital audio test
+
+- **WHEN** the sole runtime owner uses an already installed digital audio loop with a fixed synthetic sentence
+- **THEN** actual transcription, insertion and independent Return counts are checked separately and the original application input selections are restored afterward

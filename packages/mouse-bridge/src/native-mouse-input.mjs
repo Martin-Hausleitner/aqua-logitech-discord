@@ -3,8 +3,9 @@ import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 
 const DEFAULT_BINARY = fileURLToPath(new URL("../bin/native-mouse-input", import.meta.url));
-const EVENT_KEYS = new Set(["v", "type", "mode", "button", "buttonNumber", "edge", "seq", "monotonicNs"]);
-const RAW_EVENT_KEYS = new Set(["v", "type", "mode", "buttonNumber", "edge", "seq", "monotonicNs"]);
+const EVENT_KEYS = new Set(["v", "type", "mode", "button", "buttonNumber", "edge", "seq", "monotonicNs", "sourcePid", "testToken"]);
+const RAW_EVENT_KEYS = new Set(["v", "type", "mode", "buttonNumber", "edge", "seq", "monotonicNs", "sourcePid", "testToken"]);
+const TEST_CORRELATION_KEYS = new Set(["sourcePid", "testToken"]);
 const FN_RESULT_KEYS = new Set(["v", "type", "mode", "id", "ok", "held", "reason", "controlNs", "seq", "monotonicNs"]);
 const FN_REASONS = new Set(["posted", "unchanged", "invalid_request", "observe_mode", "not_ready", "permission", "event_create_failed"]);
 const BUTTON_NUMBERS = { front: 4, back: 3 };
@@ -14,6 +15,49 @@ const TERMINAL_ERRORS = new Set([
   "PARENT_PIPE_CLOSED", "INPUT_UNAVAILABLE", "INPUT_OVERFLOW", "TERMINATED",
   "FN_RELEASE_FAILED",
 ]);
+
+// Exported validators may be called with arbitrary objects. Inspect own data
+// descriptors without invoking getters; native protocol input itself is JSON.
+function dataRecord(value, allowedKeys) {
+  try {
+    if (value == null || typeof value !== "object" || Array.isArray(value)) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const record = Object.create(null);
+    for (const key of Reflect.ownKeys(descriptors)) {
+      // Optional diagnostics never decide whether a valid input edge routes.
+      // In particular, ignore accessors here without ever invoking them.
+      if (TEST_CORRELATION_KEYS.has(key)) continue;
+      const descriptor = descriptors[key];
+      if (!allowedKeys.has(key) || !Object.hasOwn(descriptor, "value") || !descriptor.enumerable) return null;
+      record[key] = descriptor.value;
+    }
+    return record;
+  } catch { return null; }
+}
+
+function testCorrelation(event, buttonNumber) {
+  try {
+    if (buttonNumber !== 3 && buttonNumber !== 4) return null;
+    const pid = Object.getOwnPropertyDescriptor(event, "sourcePid");
+    const tag = Object.getOwnPropertyDescriptor(event, "testToken");
+    if (!pid || !tag || !Object.hasOwn(pid, "value") || !Object.hasOwn(tag, "value")
+      || !pid.enumerable || !tag.enumerable) return null;
+    const sourcePid = pid.value;
+    const testToken = tag.value;
+    if (!Number.isSafeInteger(sourcePid) || sourcePid < 1 || sourcePid > 2_147_483_647
+      || typeof testToken !== "string" || !/^[1-9]\d{0,18}$/.test(testToken)) return null;
+    const token = BigInt(testToken);
+    // Canonical decimal keeps all 63 bits intact and rejects terminal newlines
+    // too. The reserved marker is 0x4151 with a nonzero lower 48-bit nonce.
+    if (token.toString() !== testToken || token >> 48n !== 0x4151n || (token & 0xffffffffffffn) === 0n) return null;
+    return { sourcePid, testToken };
+  } catch { return null; }
+}
+
+function sanitizedMouseEvent(event, raw) {
+  const base = dataRecord(event, raw ? RAW_EVENT_KEYS : EVENT_KEYS);
+  return { ...base, ...testCorrelation(event, base.buttonNumber) };
+}
 
 export function validNativeFnResult(event, mode) {
   return event != null && typeof event === "object" && !Array.isArray(event)
@@ -29,8 +73,8 @@ export function validNativeFnResult(event, mode) {
 }
 
 export function validNativeRawMouseEvent(event, mode) {
-  return event != null && typeof event === "object" && !Array.isArray(event)
-    && Object.keys(event).every((key) => RAW_EVENT_KEYS.has(key))
+  event = dataRecord(event, RAW_EVENT_KEYS);
+  return event !== null
     && event.v === 1 && event.type === "raw_button" && event.mode === mode
     && Number.isSafeInteger(event.buttonNumber) && event.buttonNumber >= 0 && event.buttonNumber <= 65_535
     && (event.edge === "down" || event.edge === "up")
@@ -39,10 +83,10 @@ export function validNativeRawMouseEvent(event, mode) {
 }
 
 export function validNativeMouseEvent(event, mode) {
-  return event != null && typeof event === "object" && !Array.isArray(event)
-    && Object.keys(event).every((key) => EVENT_KEYS.has(key))
+  event = dataRecord(event, EVENT_KEYS);
+  return event !== null
     && event.v === 1 && event.type === "button" && event.mode === mode
-    && Object.hasOwn(BUTTON_NUMBERS, event.button)
+    && typeof event.button === "string" && Object.hasOwn(BUTTON_NUMBERS, event.button)
     && event.buttonNumber === BUTTON_NUMBERS[event.button]
     && (event.edge === "down" || event.edge === "up")
     && Number.isSafeInteger(event.seq) && event.seq > 0
@@ -102,12 +146,14 @@ export class NativeMouseInput {
     this.buffer = "";
     this.errorBuffer = "";
     this.held = new Set();
+    this.pendingTestDowns = new Map();
     this.lastSeq = 0;
     this.lastNs = 0n;
     this.state = {
       enabled: this.enabled, mode, running: false, ready: false, denied: false,
       events: 0, dispatches: 0, malformed: 0, duplicates: 0, restarts: 0,
       rawEvents: 0, rawDowns: 0, rawUps: 0, lastRawButtonNumber: null,
+      childEpoch: 0, lastRawEvent: null, lastTestPair: null,
       lastButton: null, lastEventAt: null, lastError: null,
       fnHeld: null, controlRequests: 0, controlAcks: 0, controlTimeouts: 0,
       lastControlMs: null, lastControlReason: null,
@@ -116,7 +162,42 @@ export class NativeMouseInput {
     };
   }
 
-  status() { return { ...this.state }; }
+  status() {
+    const pair = this.state.lastTestPair;
+    return {
+      ...this.state,
+      lastRawEvent: this.state.lastRawEvent ? { ...this.state.lastRawEvent } : null,
+      lastTestPair: pair ? { ...pair, down: { ...pair.down }, up: { ...pair.up } } : null,
+    };
+  }
+
+  _clearTestCorrelation() {
+    this.pendingTestDowns.clear();
+    this.state.lastRawEvent = null;
+    this.state.lastTestPair = null;
+  }
+
+  // Passive, bounded delivery evidence only. Nothing in input dispatch, Fn,
+  // recording, paste, repair, or submission reads these diagnostic fields.
+  _observeTestEdge(event) {
+    const down = this.pendingTestDowns.get(event.button);
+    this.pendingTestDowns.delete(event.button);
+    if (!testCorrelation(event, event.buttonNumber)) return;
+    if (event.edge === "down") {
+      this.pendingTestDowns.set(event.button, { ...event });
+      return;
+    }
+    if (!down || down.sourcePid !== event.sourcePid || down.testToken !== event.testToken
+      || down.buttonNumber !== event.buttonNumber || event.seq <= down.seq
+      || BigInt(event.monotonicNs) <= BigInt(down.monotonicNs)) return;
+    this.state.lastTestPair = {
+      childEpoch: this.state.childEpoch,
+      button: event.button, buttonNumber: event.buttonNumber,
+      sourcePid: event.sourcePid, testToken: event.testToken,
+      down: { seq: down.seq, monotonicNs: down.monotonicNs },
+      up: { seq: event.seq, monotonicNs: event.monotonicNs },
+    };
+  }
 
   _notify() {
     try { this.onStatus(this.status()); } catch { /* diagnostics cannot control input */ }
@@ -134,6 +215,8 @@ export class NativeMouseInput {
       return this.status();
     }
     this.child = child;
+    this.state.childEpoch++;
+    this._clearTestCorrelation();
     this.releaseOnStartChild = releaseOnStart ? child : null;
     this.buffer = "";
     this.errorBuffer = "";
@@ -157,6 +240,7 @@ export class NativeMouseInput {
   _fault(child, reason) {
     if (this.child !== child) return;
     if (this.terminatingChild === child) return;
+    this._clearTestCorrelation();
     this.state.lastError = reason;
     this.state.ready = false;
     this.state.fnHeld = null;
@@ -263,6 +347,7 @@ export class NativeMouseInput {
         clearTimeout(this.readyTimer);
         this.readyTimer = null;
         this.held.clear();
+        this._clearTestCorrelation();
         this.state.ready = true;
         this.state.lastError = null;
         if (this.state.fnHeld === null) this.state.fnHeld = false;
@@ -270,6 +355,7 @@ export class NativeMouseInput {
         continue;
       }
       if (line === "TAP_DISABLED") {
+        this._clearTestCorrelation();
         this.state.ready = false;
         this.held.clear();
         this.state.lastError = "tap_disabled";
@@ -285,6 +371,7 @@ export class NativeMouseInput {
         this.state.malformed++;
         continue;
       }
+      if (!fnResult) event = sanitizedMouseEvent(event, raw);
       const ns = BigInt(event.monotonicNs);
       if (event.seq <= this.lastSeq || ns < this.lastNs) {
         this.state.duplicates++;
@@ -321,6 +408,7 @@ export class NativeMouseInput {
         if (event.edge === "down") this.state.rawDowns++;
         else this.state.rawUps++;
         this.state.lastRawButtonNumber = event.buttonNumber;
+        this.state.lastRawEvent = { ...event, childEpoch: this.state.childEpoch };
         continue;
       }
       this.state.events++;
@@ -328,9 +416,19 @@ export class NativeMouseInput {
       this.state.lastEventAt = Date.now();
       try { this.onEvent({ ...event }); } catch { /* observation cannot control input */ }
       if (this.closed || this.child !== child || !this.state.ready) return;
-      if (event.edge === "up") { this.held.delete(event.button); continue; }
-      if (this.held.has(event.button)) { this.state.duplicates++; continue; }
+      if (event.edge === "up") {
+        if (this.held.has(event.button)) this._observeTestEdge(event);
+        else this.pendingTestDowns.delete(event.button);
+        this.held.delete(event.button);
+        continue;
+      }
+      if (this.held.has(event.button)) {
+        this.pendingTestDowns.delete(event.button);
+        this.state.duplicates++;
+        continue;
+      }
       this.held.add(event.button);
+      this._observeTestEdge(event);
       if (this.mode !== "active") continue;
       this.state.dispatches++;
       try {
@@ -366,6 +464,7 @@ export class NativeMouseInput {
 
   _ended(child, reason) {
     if (this.child !== child) return;
+    this._clearTestCorrelation();
     if (this.mode === "active" && this.fnMayBeHeld) {
       this.fnReleaseRequired = true;
       this.state.fnRecoveryRequired = true;
@@ -409,6 +508,7 @@ export class NativeMouseInput {
   close() {
     if (this.closePromise) return this.closePromise;
     this.closed = true;
+    this._clearTestCorrelation();
     this._rejectCommands("closed");
     this.state.ready = false;
     this.closePromise = Promise.resolve().then(() => this._close());

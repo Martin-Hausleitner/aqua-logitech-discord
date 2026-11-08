@@ -182,7 +182,25 @@ private func readCommands() {
     }
 }
 
-private func emitButton(number: Int64, pressed: Bool, raw: Bool = false) -> Bool {
+private struct TestCorrelation {
+    let sourcePid: Int64
+    let testToken: String
+}
+
+// Opt-in metadata for the private synthetic test helper only. Never print an
+// arbitrary event's userData/PID and never treat this marker as authenticity.
+private func testCorrelation(_ event: CGEvent, number: Int64) -> TestCorrelation? {
+    guard number == 3 || number == 4 else { return nil }
+    let token = event.getIntegerValueField(.eventSourceUserData)
+    guard token > 0 else { return nil }
+    let bits = UInt64(token)
+    guard bits >> 48 == 0x4151, bits & 0xffffffffffff != 0 else { return nil }
+    let pid = event.getIntegerValueField(.eventSourceUnixProcessID)
+    guard pid > 0, pid <= Int64(Int32.max) else { return nil }
+    return TestCorrelation(sourcePid: pid, testToken: String(token))
+}
+
+private func emitButton(number: Int64, pressed: Bool, raw: Bool = false, correlation: TestCorrelation? = nil) -> Bool {
     sequence += 1
     var event: [String: Any] = [
         "v": 1,
@@ -194,6 +212,10 @@ private func emitButton(number: Int64, pressed: Bool, raw: Bool = false) -> Bool
         "monotonicNs": String(DispatchTime.now().uptimeNanoseconds),
     ]
     if !raw { event["button"] = number == 4 ? "front" : "back" }
+    if let correlation {
+        event["sourcePid"] = correlation.sourcePid
+        event["testToken"] = correlation.testToken
+    }
     guard let data = try? JSONSerialization.data(withJSONObject: event),
           let line = String(data: data, encoding: .utf8), output(line) else {
         stop("OUTPUT_UNAVAILABLE")
@@ -240,19 +262,20 @@ private let callback: CGEventTapCallBack = { _, type, event, _ in
     // Source PID is not a physical-device proof: driver/WindowServer-originated
     // standard mouse buttons are intended input too. This helper never posts
     // side-button events, so it cannot create a side-button replay loop itself.
-    // Raw diagnostics contain only button number and edge, before mapping.
-    guard emitButton(number: number, pressed: pressed, raw: true) else {
+    // Test correlation is passive and does not change mapping or consumption.
+    let correlation = testCorrelation(event, number: number)
+    guard emitButton(number: number, pressed: pressed, raw: true, correlation: correlation) else {
         return Unmanaged.passUnretained(event)
     }
     guard number == 3 || number == 4 else { return Unmanaged.passUnretained(event) }
     if pressed {
         if !held.contains(number) {
-            guard emitButton(number: number, pressed: true) else { return Unmanaged.passUnretained(event) }
+            guard emitButton(number: number, pressed: true, correlation: correlation) else { return Unmanaged.passUnretained(event) }
             held.insert(number)
         }
     } else {
         held.remove(number)
-        guard emitButton(number: number, pressed: false) else { return Unmanaged.passUnretained(event) }
+        guard emitButton(number: number, pressed: false, correlation: correlation) else { return Unmanaged.passUnretained(event) }
     }
     // Observation is listen-only at the OS boundary as well as dispatch-free
     // in Node. Active mode consumes only the two standard side-button edges.

@@ -131,6 +131,21 @@ own Fn hold. After confirmed posting, normal token completion uses
 alive; successful initial rebase does not end the recording token. Cancellation,
 unknown outcomes and shutdown retain their hard invalidation paths.
 
+## Correlated synthetic input diagnostics
+
+The same native child can retain `nativeMouse.lastTestPair` for deliberately
+marked synthetic events. This bounded receipt binds a canonical integer marker
+to the actual source process, mapped button, ordered down/up sequences and
+native monotonic receive times. It includes `childEpoch` and is cleared on input
+lifecycle loss; both edges can arrive before the diagnostic reader polls.
+Missing or invalid optional markers leave ordinary input handling unchanged.
+
+A test driver must also verify its own process/marker, runtime generation,
+exact raw counter changes and original target. Posting acknowledgments and a
+matching pair alone do not authorize cancellation or prove exclusive input
+ownership. This metadata changes no recording, paste-proof, Return or repair
+decision and does not establish a physical device or physical mouse press.
+
 ## Local live test window
 
 ```sh
@@ -170,7 +185,7 @@ bash tools/native-receiver/build.sh
 Run these commands from this package directory. They run separate Foundation/
 filesystem checks and build `tools/native-receiver/Aqua Input Receiver.app`;
 they never launch, install or register the GUI app. The 11 receiver checks are
-separate from the existing 337 Node package tests.
+separate from the existing 346 Node package tests.
 
 The receiver uses bundle ID `org.aqua.acceptance.receiver` and window title
 `Aqua – Native Eingabeprüfung`. One normal NSTextView marked

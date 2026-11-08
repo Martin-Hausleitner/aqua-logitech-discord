@@ -532,3 +532,212 @@ test("a failed spawn closing without exit can recover without overlapping owners
   assert.equal(h.input.status().restarts, 1);
   await h.input.close();
 });
+
+const testToken = String((0x4151n << 48n) | 0x123456789abcn);
+const marker = { sourcePid: 12345, testToken };
+function marked(seq, button = "front", edge = "down", extra = {}) {
+  return event(seq, button, edge, "active", { ...marker, ...extra });
+}
+function rawEvent(seq, buttonNumber = 4, edge = "down", extra = {}) {
+  return { v: 1, type: "raw_button", mode: "active", buttonNumber, edge, seq, monotonicNs: String(seq), ...extra };
+}
+
+test("test correlation accepts exact decimal marker and bounded PID; invalid tags never block input", async () => {
+  for (const token of [String((0x4151n << 48n) | 1n), testToken, String((0x4151n << 48n) | 0xffffffffffffn)]) {
+    assert.equal(validNativeMouseEvent(marked(1, "back", "down", { testToken: token }), "active"), true);
+    assert.equal(validNativeRawMouseEvent(rawEvent(1, 3, "down", { ...marker, testToken: token }), "active"), true);
+    const h = harness();
+    h.input.start();
+    h.children[0].out("READY\n" + line(marked(1, "back", "down", { testToken: token })) + line(marked(2, "back", "up", { testToken: token })));
+    assert.equal(h.input.status().lastTestPair.testToken, token);
+    await h.input.close();
+  }
+  for (const extra of [
+    { sourcePid: 0 }, { sourcePid: -1 }, { sourcePid: 1.5 }, { sourcePid: 2_147_483_648 },
+    { sourcePid: Number.MAX_SAFE_INTEGER + 1 }, { sourcePid: "12345" }, { sourcePid: true },
+    { testToken: Number(testToken) }, { testToken: "0" }, { testToken: "-1" },
+    { testToken: `0${testToken}` }, { testToken: `+${testToken}` }, { testToken: `${testToken} ` },
+    { testToken: `${testToken}\n` }, { testToken: `${testToken}\r` }, { testToken: `${testToken}\u2028` },
+    { testToken: "9".repeat(20) }, { testToken: String(0x4151n << 48n) },
+    { testToken: String((0x4152n << 48n) | 1n) }, { testToken: "9223372036854775808" },
+    { sourcePid: undefined }, { testToken: undefined },
+  ]) {
+    assert.equal(validNativeMouseEvent(marked(1, "front", "up", extra), "active"), true);
+    assert.equal(validNativeRawMouseEvent(rawEvent(1, 4, "up", { ...marker, ...extra }), "active"), true);
+    const h = harness();
+    h.input.start();
+    h.children[0].out("READY\n"
+      + line(rawEvent(1, 4, "down", { ...marker, ...extra })) + line(marked(2, "front", "down", extra))
+      + line(rawEvent(3, 4, "up", { ...marker, ...extra })) + line(marked(4, "front", "up", extra)));
+    const state = h.input.status();
+    assert.equal(state.rawEvents, 2, "raw diagnostics must still be counted");
+    assert.equal(state.events, 2, "mapped base events must still be accepted");
+    assert.equal(state.dispatches, 1, "Down must still dispatch");
+    assert.equal(state.malformed, 0, "optional telemetry cannot reject valid input");
+    assert.equal(state.lastTestPair, null);
+    for (const output of [state.lastRawEvent, ...h.events, ...h.buttons.map((value) => value.event)]) {
+      assert.equal(Object.hasOwn(output, "sourcePid"), false);
+      assert.equal(Object.hasOwn(output, "testToken"), false);
+    }
+    await h.input.close();
+  }
+  assert.equal(validNativeRawMouseEvent(rawEvent(1, 7, "down", marker), "active"), true);
+  assert.equal(validNativeRawMouseEvent(rawEvent(1, 7), "active"), true, "legacy unmarked raw input remains valid");
+});
+
+test("protocol validation never evaluates getters or coerces object button keys", () => {
+  let reads = 0;
+  const getter = () => { reads++; throw new Error("must not run"); };
+  for (const [value, validator] of [
+    [marked(1), validNativeMouseEvent],
+    [rawEvent(1, 4, "down", marker), validNativeRawMouseEvent],
+  ]) {
+    const accessor = { ...value };
+    Object.defineProperty(accessor, "seq", { get: getter, enumerable: true });
+    assert.equal(validator(accessor, "active"), false);
+    assert.equal(validator(Object.create(value), "active"), false, "required fields must be own data properties");
+    assert.equal(validator({ ...value, [Symbol("hidden")]: 1 }, "active"), false);
+  }
+  const pidGetter = marked(1);
+  Object.defineProperty(pidGetter, "sourcePid", { get: getter, enumerable: true });
+  assert.equal(validNativeMouseEvent(pidGetter, "active"), true, "optional accessor must not affect base routing");
+  const rawGetter = rawEvent(1, 4, "down", marker);
+  Object.defineProperty(rawGetter, "testToken", { get: getter, enumerable: true });
+  assert.equal(validNativeRawMouseEvent(rawGetter, "active"), true);
+  const h = harness();
+  h.input._observeTestEdge(pidGetter);
+  assert.equal(h.input.status().lastTestPair, null);
+  assert.equal(validNativeMouseEvent(marked(1, "front", "down", { button: { toString: getter } }), "active"), false);
+  assert.equal(reads, 0);
+});
+
+test("accepted mapped pair retains exact token and allows intervening Fn sequence on both buttons", async () => {
+  for (const button of ["front", "back"]) {
+    const h = harness();
+    h.input.start();
+    const child = h.children[0];
+    child.out("READY\n");
+    const number = button === "front" ? 4 : 3;
+    child.out(line(rawEvent(1, number, "down", marker)) + line(marked(2, button)));
+    assert.equal(h.input.status().lastTestPair, null, "Down alone is not delivery completion");
+    const command = h.input.setFnHeld(false);
+    child.out(line(fnResult(1, false, 3, { reason: "unchanged" })));
+    assert.equal((await command).ok, true);
+    child.out(line(rawEvent(4, number, "up", marker)) + line(marked(5, button, "up")));
+    assert.deepEqual(h.input.status().lastTestPair, {
+      childEpoch: 1, button, buttonNumber: number, ...marker,
+      down: { seq: 2, monotonicNs: "2" }, up: { seq: 5, monotonicNs: "5" },
+    });
+    assert.equal(h.input.status().rawEvents, 2);
+    assert.equal(h.input.status().events, 2);
+    assert.equal(h.input.status().dispatches, 1);
+    assert.equal(h.input.status().fnHeld, false);
+    assert.equal(child.writes.length, 1, "correlation creates no extra control command");
+    await h.input.close();
+  }
+});
+
+test("completed pair persists across unrelated raw events and returned status cannot mutate it", async () => {
+  const h = harness();
+  h.input.start();
+  const child = h.children[0];
+  child.out("READY\n" + line(marked(1)) + line(marked(2, "front", "up")));
+  const expected = h.input.status().lastTestPair;
+  child.out(line(rawEvent(3, 7)) + line(rawEvent(4, 7, "up")));
+  const snapshot = h.input.status();
+  assert.deepEqual(snapshot.lastTestPair, expected);
+  assert.equal(snapshot.lastRawEvent.buttonNumber, 7);
+  assert.equal(Object.hasOwn(snapshot.lastRawEvent, "sourcePid"), false);
+  snapshot.lastTestPair.down.seq = 999;
+  snapshot.lastTestPair.testToken = "1";
+  snapshot.lastRawEvent.buttonNumber = 999;
+  assert.deepEqual(h.input.status().lastTestPair, expected);
+  assert.equal(h.input.status().lastRawEvent.buttonNumber, 7);
+  await h.input.close();
+});
+
+test("up-only, wrong source, wrong nonce, unmarked Up and duplicate Down cannot complete a pair", async () => {
+  for (const frames of [
+    [marked(1, "front", "up")],
+    [marked(1), marked(2, "front", "up", { sourcePid: marker.sourcePid + 1 })],
+    [marked(1), marked(2, "front", "up", { testToken: String(BigInt(testToken) + 1n) })],
+    [marked(1), event(2, "front", "up")],
+    [event(1), marked(2, "front", "up")],
+    [marked(1), marked(2), marked(3, "front", "up")],
+    [marked(1), marked(2, "back", "up")],
+  ]) {
+    const h = harness();
+    h.input.start();
+    h.children[0].out("READY\n" + frames.map(line).join(""));
+    assert.equal(h.input.status().lastTestPair, null);
+    await h.input.close();
+  }
+});
+
+test("replayed sequence and backwards monotonic Up never appear in completed pair", async () => {
+  for (const up of [marked(1, "front", "up"), marked(2, "front", "up", { monotonicNs: "0" })]) {
+    const h = harness();
+    h.input.start();
+    h.children[0].out("READY\n" + line(marked(1)) + line(up));
+    assert.equal(h.input.status().lastTestPair, null);
+    assert.equal(h.input.status().duplicates, 1);
+    await h.input.close();
+  }
+});
+
+test("equal monotonic timestamps keep base routing but cannot prove a strict test pair", async () => {
+  const h = harness();
+  h.input.start();
+  h.children[0].out("READY\n" + line(marked(1)) + line(marked(2, "front", "up", { monotonicNs: "1" })));
+  assert.equal(h.input.status().lastTestPair, null);
+  assert.equal(h.input.status().events, 2);
+  assert.equal(h.input.status().dispatches, 1);
+  assert.equal(h.input.status().duplicates, 0, "pair strictness never changes existing replay semantics");
+  await h.input.close();
+});
+
+test("lifecycle boundaries erase stale pair and pending Down; restart gets a new child epoch", async () => {
+  const h = harness({ maxRestarts: 1 });
+  h.input.start();
+  const first = h.children[0];
+  first.out("READY\n" + line(marked(1)) + line(marked(2, "front", "up")));
+  assert.equal(h.input.status().lastTestPair.childEpoch, 1);
+  first.out("TAP_DISABLED\n");
+  assert.equal(h.input.status().lastTestPair, null);
+  first.out("READY\n" + line(marked(3)) + "TAP_DISABLED\nREADY\n" + line(marked(4, "front", "up")));
+  assert.equal(h.input.status().lastTestPair, null, "no pair crosses tap rearm");
+  first.out(line(marked(5)));
+  first.exit();
+  await pause(10);
+  assert.equal(h.input.status().childEpoch, 2);
+  const second = h.children[1];
+  second.out("READY\n" + line(marked(1, "front", "up")));
+  first.out(line(marked(6, "front", "up")));
+  assert.equal(h.input.status().lastTestPair, null, "old child and pending Down cannot cross restart");
+  second.out(line(marked(2)) + line(marked(3, "front", "up")));
+  assert.equal(h.input.status().lastTestPair.childEpoch, 2);
+  await h.input.close();
+  assert.equal(h.input.status().lastTestPair, null);
+  assert.equal(h.input.status().lastRawEvent, null);
+});
+
+test("marked telemetry preserves control behavior and remains dispatch-free in observe mode", async () => {
+  for (const mode of ["active", "observe"]) {
+    const results = [];
+    for (const tagged of [false, true]) {
+      const h = harness({ mode });
+      h.input.start();
+      const child = h.children[0];
+      child.out("READY\n");
+      for (const [seq, button, edge] of [[1, "front", "down"], [2, "back", "down"], [3, "front", "up"], [4, "back", "up"]]) {
+        child.out(line(event(seq, button, edge, mode, tagged ? marker : {})));
+      }
+      const state = h.input.status();
+      results.push({ buttons: h.buttons.map((value) => value.button), events: state.events, dispatches: state.dispatches, fnHeld: state.fnHeld, writes: child.writes });
+      assert.equal(state.lastTestPair?.button ?? null, tagged ? "back" : null);
+      await h.input.close();
+    }
+    assert.deepEqual(results[0], results[1], "diagnostic mark must not affect control behavior");
+    assert.equal(results[1].dispatches, mode === "active" ? 2 : 0);
+  }
+});

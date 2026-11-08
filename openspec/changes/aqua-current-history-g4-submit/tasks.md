@@ -24,8 +24,8 @@
 
 ## 2. Validate
 
-- [x] Run the current publication candidate's full isolated regression suite: 337 tests passed, zero failures and zero skipped tests, including initial-send/rebase, private AX diagnostics and the read-only monitor. The receiver's eleven Foundation checks are separate.
-- [x] Compile the changed native paste helper in the final publication candidate without starting it; native input and HID sources are unchanged in this update.
+- [x] Run the current publication candidate's full isolated regression suite: 346 tests passed, zero failures and zero skipped tests, including marked native input receipts, initial-send/rebase, private AX diagnostics and the read-only monitor. The receiver's eleven Foundation checks are separate.
+- [x] Compile the native input helper from the reviewed publication sources without starting it; retain the previous successful native paste-helper compilation. Existing HID behavior is unchanged.
 - [x] Strictly validate the updated state-based click and initial-draft OpenSpec delta before source transfer.
 - [x] Complete final publication diff/privacy checks after source transfer; frozen sources match and the allowed patch passes whitespace and privacy checks.
 - [x] Independently review the changed frozen scope: held releases, tap-loss Fn ownership, pending-transcript overlap, initial-send/rebase proof, cancellation/shutdown and sender lifetime (67 targeted isolated tests passed; 15 frozen file hashes verified before and after; no new P1/P2 findings). Audit/repair foundations are unchanged and retain their earlier separate review.
@@ -51,3 +51,13 @@
 - [x] Observe one approximately 600-ms synthetic held press start and stop without an additional initial submission or Return; this is a local pipeline observation, not a physical hold test.
 - [ ] Explain the earlier initial AX/rebase `focus_missing` failure and the later missing simulated stop-up, then verify reliable repetition; separate owned release cleanup does not establish the cause or close this requirement.
 - [ ] Retain all original physical mouse, speech, first-word, latency and browser/Electron/Codex acceptance requirements regardless of isolated receiver results.
+
+## 5. Autonomous synthetic input and audio validation
+
+- [x] Implement and independently regression-test passive marked input receipts with actual source-process metadata, canonical marker, mapped ordered pair and child lifecycle, preserving ordinary routing and proof/control behavior: 35 fake-child Node tests and 15 separate pure Swift metadata checks passed; live receipt acceptance remains separate.
+- [ ] Independently review and test the asynchronous sender/driver acknowledgment protocol, one-up bound, negative cases and exclusive runtime/raw-counter correlation before live input.
+- [ ] Observe bounded short and held synthetic cases for both buttons, with rear final automatic Return suppressed and independent receiver counts.
+- [ ] Use the already installed digital audio loop for real Aqua test-sentence transcription, insertion and front/rear Return checks only after validating target and audio quiescence.
+- [ ] Verify pending-transcript follow-up clicks, overlap, focus/cancel and phase timing from actual receipts; leave unobserved cases open.
+- [ ] Restore and verify both original application microphone selections and unchanged system audio defaults after digital-audio tests.
+- [ ] Retain separate digital test-signal, fixture, physical mouse, natural first-word and browser/Electron/Codex evidence scopes.
