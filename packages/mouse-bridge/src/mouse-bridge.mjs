@@ -28,6 +28,7 @@ import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 const execFileAsync = promisify(execFile);
+import { createShortClickInput } from "./short-click-input.mjs";
 import { createMachine, reduce } from "./state-machine.mjs";
 import { readFreshTranscription, snapshotSignals, waitUntilSettled } from "./settle.mjs";
 import { shouldSubmit } from "./submit-policy.mjs";
@@ -80,8 +81,14 @@ let lastNativeMouseStatus = "";
 const nativeMouseInput = createNativeMouseInput({
   enabled: !DRY && /^(1|true)$/i.test(process.env.AQUA_NATIVE_MOUSE_INPUT ?? "0"),
   mode: process.env.AQUA_NATIVE_MOUSE_MODE ?? "observe",
-  onButton: (button) => handleEvent(button === "front" ? "BUTTON_SEND_TAP" : "BUTTON_DICTATE_TAP"),
+  onButton: (button, event) => shortClickInput.down(button, event.monotonicNs),
+  onEvent: (event) => {
+    if (event.mode === "active" && event.edge === "up") {
+      Promise.resolve(shortClickInput.up(event.button, event.monotonicNs)).catch(() => log("manual Enter failed"));
+    }
+  },
   onStatus: (status) => {
+    if (!status.ready) shortClickInput.reset();
     const signature = JSON.stringify([status.running, status.ready, status.denied, status.lastError]);
     if (signature === lastNativeMouseStatus) return;
     lastNativeMouseStatus = signature;
@@ -238,6 +245,8 @@ const metrics = {
   totalLatencyMs: 0,
   avgLatencyMs: 0,
   enterCount: 0,
+  manualEnterCount: 0,
+  manualEnterAttempts: 0,
   lastEnterAt: null,
   lastSettleReason: null,
   lastStopToEnterMs: null,
@@ -295,6 +304,61 @@ let shuttingDown = false;
 let shutdownPromise = null;
 let currentAuditRun = null;
 let controlRecovery = false;
+let autoEnterInFlight = false;
+let manualEnterInFlight = false;
+const shortClickInput = createShortClickInput({
+  getState: () => ({ mode: machine.mode, busy, stopAt: stopRequestedAt, enterCount: metrics.enterCount }),
+  toggle: (button) => handleEvent(button === "front" ? "BUTTON_SEND_TAP" : "BUTTON_DICTATE_TAP"),
+  enter: (button) => requestManualEnter(button),
+});
+
+async function requestManualEnter(button) {
+  // Never race a native Enter that may already have been posted. No retries.
+  if (shuttingDown || controlRecovery || autoEnterInFlight || manualEnterInFlight ||
+      pendingStartCapture || machine.mode === "toggle_recording" || machine.mode === "ptt_holding") {
+    return { ok: false, reason: "input_busy" };
+  }
+  if (!AUTO_SUBMIT || DRY || !verifiedPasteGate) return { ok: false, reason: "preview" };
+  manualEnterInFlight = true;
+  metrics.manualEnterAttempts++;
+  const context = { id: randomUUID(), route: button };
+  inputGeneration++;
+  const generation = inputGeneration;
+  currentSettleAbort?.abort();
+  currentSettleAbort = null;
+  pendingRestart = false;
+  pendingRestartEvent = null;
+  activeRun = null;
+  cancelPasteGateRun();
+  // This invalidates deferred submit only. It does not emit Fn-up or Fn-down.
+  machine = reduce(machine, { type: "SETTLE_DONE" }).state;
+  busy = true;
+  const token = `manual-${randomUUID()}`;
+  audit("input", context, { status: "started", reason: "manual_enter" });
+  try {
+    const capture = await verifiedPasteGate.capture({ token });
+    if (generation !== inputGeneration || shuttingDown) return { ok: false, reason: "cancelled" };
+    if (!capture?.ok) {
+      audit("suppressed", context, { status: "suppressed", reason: sanitizeReasonCode(capture?.reason) });
+      return capture;
+    }
+    const result = await verifiedPasteGate.manualEnter({ token });
+    if (generation !== inputGeneration) return { ok: false, reason: "cancelled" };
+    if (result?.ok) {
+      metrics.enterCount++;
+      metrics.lastEnterAt = Date.now();
+      metrics.manualEnterCount++;
+      audit("enter_emitted", context, { reason: "manual_posted" });
+    } else {
+      audit("suppressed", context, { status: "suppressed", reason: sanitizeReasonCode(result?.reason) });
+    }
+    return result;
+  } finally {
+    verifiedPasteGate.cancel({ token });
+    manualEnterInFlight = false;
+    if (generation === inputGeneration) busy = false;
+  }
+}
 
 function routeFor(type) {
   return type === "BUTTON_SEND_TAP" ? "front" : type === "BUTTON_DICTATE_TAP" ? "back" : "legacy";
@@ -327,6 +391,7 @@ async function recoverUnavailableNativeInput(nativeStatus = {}) {
     inputGeneration++;
     pendingStartCapture = null;
     cancelPasteGateRun();
+    if (manualEnterInFlight) verifiedPasteGate?.cancel({ token: verifiedPasteGate.activeToken });
     currentSettleAbort?.abort();
     currentSettleAbort = null;
     pendingRestart = false;
@@ -592,12 +657,15 @@ async function runActions(actions) {
             try {
               // The helper revalidates app, window, focused element and value
               // immediately before emitting Enter in that same process.
+              autoEnterInFlight = true;
               gateResult = await verifiedPasteGate.verifyAndEnter({
                 token: pasteRun.token,
                 expectedText: expectedTranscript,
               });
             } catch {
               gateResult = { ok: false, reason: "helper_unavailable" };
+            } finally {
+              autoEnterInFlight = false;
             }
             if (generation !== inputGeneration) return;
             metrics.lastProofMs = Date.now() - proofAt;
@@ -666,6 +734,7 @@ async function executeActions(actions) {
 async function handleEvent(type, { countInput = true } = {}) {
   if (shuttingDown) return { ok: false, reason: "shutting_down", state: machine, actions: [] };
   if (controlRecovery) return { ok: false, reason: "native_input_unavailable", state: machine, actions: [] };
+  if (manualEnterInFlight && type !== "CANCEL") return { ok: false, reason: "manual_enter_busy", state: machine, actions: [] };
   if (countInput) {
     audit("input", { route: routeFor(type) }, { id: randomUUID(), status: "started" });
     if (isToggleEvent(type)) metrics.totalToggles++;
@@ -679,9 +748,11 @@ async function handleEvent(type, { countInput = true } = {}) {
   }
 
   if (type === "CANCEL") {
+    shortClickInput.reset();
     inputGeneration++;
     pendingStartCapture = null;
     cancelPasteGateRun();
+    if (manualEnterInFlight) verifiedPasteGate?.cancel({ token: verifiedPasteGate.activeToken });
     activeRun = null;
     pendingRestart = false;
     pendingRestartEvent = null;
@@ -814,6 +885,8 @@ const server = createServer(async (req, res) => {
       config: {
         toggleMode: TOGGLE_MODE,
         autoSubmit: AUTO_SUBMIT,
+        shortClickMs: 350,
+        followupEnterWindowMs: 8000,
         autoEnterApps: AUTO_ENTER_APPS,
         autoEnterTitles: AUTO_ENTER_TITLES,
       },

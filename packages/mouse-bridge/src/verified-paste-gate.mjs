@@ -89,6 +89,21 @@ export function evaluatePasteTransition({ baseline, current }) {
   return { ok: true, reason: "verified" };
 }
 
+/** Explicit user Enter needs a stable destination, not an exact transcript. */
+export function evaluateManualEnter({ baseline, current }) {
+  if (!baseline || !current || baseline.permission !== true || current.permission !== true) {
+    return { ok: false, reason: "missing_permission" };
+  }
+  if (!sameIdentity(baseline.pid, current.pid)) return { ok: false, reason: "app_changed" };
+  if (!sameIdentity(baseline.windowId, current.windowId)) return { ok: false, reason: "window_changed" };
+  if (!sameIdentity(baseline.elementId, current.elementId)) return { ok: false, reason: "focus_changed" };
+  if (typeof current.value !== "string") return { ok: false, reason: "missing_text" };
+  if (!current.value.trim()) return { ok: false, reason: "empty_field" };
+  if (!validSelection(current.selection, current.value)) return { ok: false, reason: "missing_selection" };
+  if (current.selection.length !== 0) return { ok: false, reason: "selection_not_collapsed" };
+  return { ok: true, reason: "verified" };
+}
+
 function genericFailure(reason = "helper_unavailable") {
   return { ok: false, reason: String(reason).replace(/[^a-z0-9_-]/gi, "_").slice(0, 64) || "helper_unavailable" };
 }
@@ -135,6 +150,8 @@ export class VerifiedPasteGate {
     this.buffer = "";
     this.nextId = 0;
     this.pending = new Map();
+    this.retiringChildren = new Map();
+    this.enteringTokens = new Set();
     this.activeToken = null;
     this.consumedTokens = new Set();
     this.generation = 0;
@@ -144,7 +161,7 @@ export class VerifiedPasteGate {
   }
 
   _ensureChild() {
-    if (this.closed) return null;
+    if (this.closed || this.retiringChildren.size > 0) return null;
     if (this.child) return this.child;
     let child;
     try {
@@ -162,7 +179,7 @@ export class VerifiedPasteGate {
     });
     child.stdin?.on?.("error", () => this._dropChild(child, "helper_stdin_error"));
     child.on?.("error", () => this._dropChild(child, "helper_error"));
-    child.on?.("exit", () => this._dropChild(child, "helper_exit"));
+    child.on?.("exit", () => this._dropChild(child, "helper_exit", { exited: true }));
     return child;
   }
 
@@ -204,7 +221,41 @@ export class VerifiedPasteGate {
     }
   }
 
-  _dropChild(child, reason) {
+  _retireChild(child, signal = "SIGKILL") {
+    if (!child) return;
+    if (child.exitCode != null || child.signalCode != null) return;
+    if (!this.retiringChildren.has(child)) {
+      let resolve;
+      const retired = new Promise((done) => { resolve = done; });
+      this.retiringChildren.set(child, retired);
+      const onExit = () => {
+        child.removeListener?.("exit", onExit);
+        child.removeListener?.("close", onExit);
+        this.retiringChildren.delete(child);
+        resolve();
+      };
+      // Observe actual termination before admitting another helper. Sending
+      // SIGKILL alone is not evidence that the old process has stopped.
+      child.once?.("exit", onExit);
+      child.once?.("close", onExit);
+    }
+    try { child.kill?.(signal); } catch { /* retain the barrier, fail closed */ }
+  }
+
+  async _waitForRetirement(timeoutMs = this.commandTimeoutMs) {
+    if (this.retiringChildren.size === 0) return true;
+    let timer;
+    try {
+      return await Promise.race([
+        Promise.all([...this.retiringChildren.values()]).then(() => true),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  _dropChild(child, reason, { exited = false } = {}) {
     if (this.child !== child) return;
     this.child = null;
     this.buffer = "";
@@ -215,7 +266,7 @@ export class VerifiedPasteGate {
       pending.resolve(genericFailure(reason));
     }
     // A failed proof process must not survive to deliver a late Enter.
-    try { child.kill?.("SIGKILL"); } catch { /* fail closed */ }
+    if (!exited) this._retireChild(child);
   }
 
   _invalidateProcess({ signal = "SIGKILL" } = {}) {
@@ -229,18 +280,24 @@ export class VerifiedPasteGate {
       pending.signal?.removeEventListener("abort", pending.onAbort);
       pending.resolve(genericFailure("cancelled"));
     }
-    try { child?.kill?.(signal); } catch { /* fail closed */ }
+    this._retireChild(child, signal);
   }
 
-  _request(op, token, fields = {}, { signal, timeoutMs } = {}) {
+  async _request(op, token, fields = {}, { signal, timeoutMs } = {}) {
     if (signal?.aborted) return Promise.resolve(genericFailure("aborted"));
     if (typeof token !== "string" || token.length === 0) return Promise.resolve(genericFailure("missing_token"));
     if (this.closed) return Promise.resolve(genericFailure("helper_closed"));
+    const generation = this.generation;
+    if (this.retiringChildren.size > 0 && !(await this._waitForRetirement())) {
+      return genericFailure("helper_still_stopping");
+    }
+    if (signal?.aborted) return genericFailure("aborted");
+    if (this.closed) return genericFailure("helper_closed");
+    if (this.generation !== generation) return genericFailure("cancelled");
     const child = this._ensureChild();
     if (!child?.stdin?.write) return Promise.resolve(genericFailure("helper_unavailable"));
     const id = ++this.nextId;
     const request = JSON.stringify({ id, op, token, ...fields });
-    const generation = this.generation;
     return new Promise((resolve) => {
       let onAbort;
       const timer = setTimeout(() => {
@@ -275,9 +332,9 @@ export class VerifiedPasteGate {
 
   async capture({ token, signal } = {}) {
     if (typeof token !== "string" || token.length === 0) return genericFailure("missing_token");
+    if (this.consumedTokens.has(token)) return genericFailure("already_consumed");
     if (this.activeToken && this.activeToken !== token) this._invalidateProcess();
     this.activeToken = token;
-    this.consumedTokens.delete(token);
     const result = await this._request("capture", token, {}, { signal });
     if (!result.ok && this.activeToken === token) this.activeToken = null;
     return result;
@@ -286,15 +343,40 @@ export class VerifiedPasteGate {
   async verifyAndEnter({ token, expectedText, signal } = {}) {
     if (this.activeToken !== token) return genericFailure("stale_run");
     if (this.consumedTokens.has(token)) return genericFailure("already_consumed");
+    if (this.enteringTokens.has(token)) return genericFailure("enter_in_progress");
     if (typeof expectedText !== "string" || expectedText.length === 0) return genericFailure("missing_expected_text");
-    const result = await this._request(
-      "verify_and_enter",
-      token,
-      { expectedText, timeoutMs: this.verifyTimeoutMs },
-      { signal, timeoutMs: this.verifyTimeoutMs + this.commandTimeoutMs },
-    );
-    if (result.ok) this.consumedTokens.add(token);
-    return result;
+    this.enteringTokens.add(token);
+    try {
+      const result = await this._request(
+        "verify_and_enter",
+        token,
+        { expectedText, timeoutMs: this.verifyTimeoutMs },
+        { signal, timeoutMs: this.verifyTimeoutMs + this.commandTimeoutMs },
+      );
+      if (result.ok) this.consumedTokens.add(token);
+      return result;
+    } finally {
+      this.enteringTokens.delete(token);
+    }
+  }
+
+  /**
+   * One explicit user Enter against this token's captured AX destination.
+   * No transcript is supplied. A pending auto Enter must finish or be
+   * cancelled before a fresh token is captured; manual never queues behind it.
+   */
+  async manualEnter({ token, signal } = {}) {
+    if (this.activeToken !== token) return genericFailure("stale_run");
+    if (this.consumedTokens.has(token)) return genericFailure("already_consumed");
+    if (this.enteringTokens.has(token)) return genericFailure("enter_in_progress");
+    this.enteringTokens.add(token);
+    try {
+      const result = await this._request("manual_enter", token, {}, { signal });
+      if (result.ok) this.consumedTokens.add(token);
+      return result;
+    } finally {
+      this.enteringTokens.delete(token);
+    }
   }
 
   /** Synchronous invalidation prevents a late helper response from emitting. */
@@ -310,6 +392,8 @@ export class VerifiedPasteGate {
     const child = this.child;
     if (!child) {
       this._invalidateProcess();
+      for (const retiring of this.retiringChildren.keys()) this._retireChild(retiring);
+      await this._waitForRetirement(killTimeoutMs);
       return;
     }
     const exited = waitForChildExit(child, timeoutMs);

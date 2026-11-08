@@ -2,8 +2,9 @@
 
 ### Requirement: Two physical dictation modes
 
-The front side button (G5) SHALL toggle Aqua and request Return only after exact
-native paste proof. The back side button (G4) SHALL toggle Aqua without Return.
+The front side button (G5) SHALL toggle Aqua and request automatic Return only
+after exact native paste proof. The back side button (G4) SHALL toggle Aqua
+without automatic Return on recording stop.
 The stopping button SHALL select the action, including a cross-button stop.
 Aqua SHALL insert at the original cursor without manual paste.
 `AQUA_AUTO_SUBMIT=0` SHALL suppress every automatic Return variant.
@@ -137,3 +138,47 @@ exclusive ownership and maintenance guards SHALL survive bridge restarts.
 
 - **WHEN** the maintenance marker exists or input/recording is still active
 - **THEN** no automatic runtime repair is performed
+
+### Requirement: Explicit short follow-up Return
+
+During processing, or within eight seconds of the last recording stop, a
+complete native down/up pair lasting no more than 350 milliseconds on either
+side button SHALL request one explicit manual Return instead of restarting
+Aqua. A longer hold SHALL NOT send Return in this follow-up state. After the
+window expires, an idle press SHALL resume its recording-toggle meaning.
+No timer SHALL emit Return. Global preview mode SHALL suppress manual Return.
+
+#### Scenario: Back-button manual follow-up
+
+- **WHEN** a back-button recording stop is followed by a short back-button click within the follow-up window
+- **THEN** the stop inserts text without automatic Return and the separate click may request one manual Return
+
+#### Scenario: Automatic submission overlaps the click
+
+- **WHEN** automatic Return is already in flight or completes during a short follow-up click
+- **THEN** that click is consumed without emitting an additional Return
+
+### Requirement: Manual destination proof
+
+An explicit manual Return SHALL capture the current destination and require a
+nonempty editable field, collapsed cursor and stable process/window/field/text
+and selection before posting. It SHALL NOT require an Aqua history transition,
+release Fn, or toggle recording. It SHALL cancel deferred automatic submission
+and SHALL remain cancellable on shutdown, user cancellation or input loss.
+
+#### Scenario: Focus changes during manual proof
+
+- **WHEN** the manual destination changes before the key is posted
+- **THEN** the manual Return is suppressed without restarting Aqua
+
+### Requirement: Nearby send-control readiness
+
+Automatic Return SHALL also respect a recognized send control in the bounded
+composer group containing the focused field. A recognized disabled or
+ambiguous control SHALL suppress automatic Return. The check SHALL supplement
+exact insertion proof and SHALL NOT scan the whole window or click a control.
+
+#### Scenario: Send control is disabled
+
+- **WHEN** the nearby recognized send control remains disabled after text insertion
+- **THEN** no automatic Return is posted until all existing proof requirements hold

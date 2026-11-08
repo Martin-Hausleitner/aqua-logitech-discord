@@ -1,9 +1,14 @@
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import {
   VerifiedPasteGate,
   evaluatePasteTransition,
+  evaluateManualEnter,
   expectedValueForSelection,
 } from "./verified-paste-gate.mjs";
 
@@ -144,6 +149,191 @@ test("selection offsets use UTF-16 and preserve a Unicode replacement", () => {
   }), { ok: true, reason: "verified" });
 });
 
+test("explicit Enter accepts current text without an exact transcript or changed value", () => {
+  for (const value of ["draft", "Aqua punctuation changed!", "😀"]) {
+    assert.deepEqual(evaluateManualEnter({
+      baseline: snapshot(),
+      current: snapshot({ value, selection: { location: value.length, length: 0 } }),
+    }), { ok: true, reason: "verified" });
+  }
+});
+
+test("explicit Enter keeps destination, nonempty text and collapsed caret requirements", () => {
+  for (const [overrides, reason] of [
+    [{ pid: 99 }, "app_changed"],
+    [{ windowId: "other-window" }, "window_changed"],
+    [{ elementId: "other-field" }, "focus_changed"],
+    [{ permission: false }, "missing_permission"],
+    [{ value: null }, "missing_text"],
+    [{ value: " \n\t" }, "empty_field"],
+    [{ selection: null }, "missing_selection"],
+    [{ selection: { location: 1, length: 2 } }, "selection_not_collapsed"],
+    [{ value: "A😀B", selection: { location: 2, length: 0 } }, "missing_selection"],
+  ]) {
+    assert.equal(evaluateManualEnter({ baseline: snapshot(), current: snapshot(overrides) }).reason, reason);
+  }
+});
+
+test("native Send labels recognize specific message actions and reject generic dialog actions", {
+  skip: process.platform !== "darwin",
+}, () => {
+  const source = readFileSync(new URL("./verified-paste-gate.swift", import.meta.url), "utf8");
+  const predicate = source.match(/private func isRecognizedSendLabel[\s\S]*?\n}\n/)[0];
+  const examples = [
+    ["Send", "com.openai.chat", true],
+    ["Senden", "com.openai.codex", true],
+    ["  SEND   MESSAGE ", "org.example.browser", true],
+    ["Send prompt", "org.example.browser", true],
+    ["Nachricht senden", "org.example.browser", true],
+    ["Prompt senden", "org.example.browser", true],
+    ["Send", "org.example.dialog", false],
+    ["Senden", "org.example.dialog", false],
+    ["Send", "com.openai.chat.other", false],
+    ["OK", "com.openai.chat", false],
+    ["Submit", "com.openai.chat", false],
+    ["Resend message", "com.openai.chat", false],
+    ["Send message later", "com.openai.chat", false],
+  ];
+  const assertions = examples.map(([label, bundle, expected]) =>
+    `assert(isRecognizedSendLabel(${JSON.stringify(label)}, bundleIdentifier: ${JSON.stringify(bundle)}) == ${expected})`
+  ).join("\n");
+  const dir = mkdtempSync(join(tmpdir(), "aqua-send-labels-"));
+  try {
+    const input = join(dir, "labels.swift");
+    const executable = join(dir, "labels");
+    writeFileSync(input, `import Foundation\n${predicate}\n${assertions}\n`);
+    const compiled = spawnSync("swiftc", [input, "-o", executable], { encoding: "utf8" });
+    assert.equal(compiled.status, 0, compiled.stderr);
+    // Only the pure label predicate is compiled/executed. No AX or key API.
+    const result = spawnSync(executable, [], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("native composer traversal requires a unique enabled nearby Send button", {
+  skip: process.platform !== "darwin",
+}, () => {
+  const source = readFileSync(new URL("./verified-paste-gate.swift", import.meta.url), "utf8");
+  const predicates = source.slice(source.indexOf("private func isRecognizedSendLabel"), source.indexOf("private func verify(_ baseline"));
+  // Compile the actual traversal with an in-memory AX tree. The harness has
+  // no AppKit/ApplicationServices imports and cannot inspect or type in apps.
+  const harness = `
+import Foundation
+typealias CFTypeRef = Any
+typealias CFString = String
+typealias CFIndex = Int
+typealias CFArray = [AXUIElement]
+enum AXError { case success, attributeUnsupported, noValue }
+final class AXUIElement {
+    let role: String
+    var label: String = ""
+    var enabled: Bool? = true
+    var hidden = false
+    var pid: Int32 = 42
+    weak var parent: AXUIElement?
+    var children: [AXUIElement] = []
+    init(_ role: String, _ label: String = "", _ children: [AXUIElement] = []) {
+        self.role = role; self.label = label; self.children = children
+        for child in children { child.parent = self }
+    }
+}
+struct AXSnapshot { let pid: Int32 = 42; let element: AXUIElement }
+var bundle = "com.openai.chat"
+struct NSRunningApplication {
+    var bundleIdentifier: String? { bundle }
+    init?(processIdentifier: Int32) {}
+}
+let parentAttribute = "parent", roleAttribute = "role", childrenAttribute = "children"
+let kAXTitleAttribute = "title", kAXDescriptionAttribute = "description"
+let kAXHelpAttribute = "help", kAXEnabledAttribute = "enabled"
+func attribute(_ node: AXUIElement, _ name: String) -> Any? {
+    switch name {
+    case parentAttribute: return node.parent
+    case roleAttribute: return node.role
+    case kAXTitleAttribute: return node.label
+    case kAXEnabledAttribute: return node.enabled
+    case "AXHidden": return node.hidden
+    default: return nil
+    }
+}
+func CFGetTypeID(_ value: Any) -> Int { value is AXUIElement ? 1 : 0 }
+func AXUIElementGetTypeID() -> Int { 1 }
+func sameElement(_ left: AXUIElement, _ right: AXUIElement) -> Bool { left === right }
+func AXUIElementSetMessagingTimeout(_ node: AXUIElement, _ timeout: Float) {}
+func AXUIElementGetPid(_ node: AXUIElement, _ pid: inout Int32) -> AXError { pid = node.pid; return .success }
+func AXUIElementGetAttributeValueCount(_ node: AXUIElement, _ name: String, _ count: inout Int) -> AXError {
+    count = node.children.count; return .success
+}
+func AXUIElementCopyAttributeValues(_ node: AXUIElement, _ name: String, _ start: Int, _ count: Int, _ result: inout CFArray?) -> AXError {
+    result = Array(node.children[start..<(start + count)]); return .success
+}
+${predicates}
+func check(_ field: AXUIElement, recognized: Bool, ready: Bool) {
+    let result = sendReadiness(AXSnapshot(element: field))
+    assert(result.recognized == recognized && result.ready == ready)
+}
+let field = AXUIElement("AXTextArea")
+let send = AXUIElement("AXButton", "Send")
+let composer = AXUIElement("AXGroup", "", [field, send])
+let window = AXUIElement("AXWindow", "", [composer])
+check(field, recognized: true, ready: true)
+send.enabled = false
+check(field, recognized: true, ready: false)
+send.enabled = nil
+check(field, recognized: true, ready: false)
+send.enabled = true; send.hidden = true
+check(field, recognized: true, ready: false)
+send.hidden = false
+bundle = "org.example.dialog"
+check(field, recognized: false, ready: false)
+send.label = "Send message"
+check(field, recognized: true, ready: true)
+send.label = "OK"
+check(field, recognized: false, ready: false)
+send.label = "Send message"
+let duplicate = AXUIElement("AXButton", "Send prompt")
+duplicate.parent = composer; composer.children.append(duplicate)
+check(field, recognized: true, ready: false)
+composer.children.removeLast()
+let otherField = AXUIElement("AXTextArea")
+otherField.parent = composer; composer.children.append(otherField)
+check(field, recognized: false, ready: false)
+composer.children.removeLast()
+// A Send button elsewhere in the window is not this composer's Send button.
+composer.children = [field]
+send.parent = window; window.children.append(send)
+check(field, recognized: false, ready: false)
+// A small wrapper around the field still finds its nearest composer group.
+let wrapper = AXUIElement("AXGroup", "", [field])
+wrapper.parent = composer; send.parent = composer; composer.children = [wrapper, send]
+check(field, recognized: true, ready: true)
+// Cycles, foreign processes and unbounded trees never authorize submission.
+composer.parent = wrapper
+composer.children = [wrapper]
+check(field, recognized: false, ready: false)
+composer.parent = window; composer.children = [wrapper, send]
+send.pid = 99
+check(field, recognized: false, ready: false)
+send.pid = 42
+composer.children.append(contentsOf: (0..<100).map { _ in AXUIElement("AXGroup") })
+check(field, recognized: false, ready: false)
+`;
+  const dir = mkdtempSync(join(tmpdir(), "aqua-composer-tree-"));
+  try {
+    const input = join(dir, "composer.swift");
+    const executable = join(dir, "composer");
+    writeFileSync(input, harness);
+    const compiled = spawnSync("swiftc", [input, "-o", executable], { encoding: "utf8" });
+    assert.equal(compiled.status, 0, compiled.stderr);
+    const result = spawnSync(executable, [], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 class FakeChild extends EventEmitter {
   constructor() {
     super();
@@ -266,4 +456,131 @@ test("stale token and repeated verification never emit a second Enter", async ()
   assert.equal((await gate.verifyAndEnter({ token: "stale", expectedText: "text" })).reason, "stale_run");
   assert.equal((await gate.verifyAndEnter({ token: "current", expectedText: "text" })).ok, true);
   assert.equal((await gate.verifyAndEnter({ token: "current", expectedText: "text" })).reason, "already_consumed");
+});
+
+test("manual Enter is one-shot across manual and automatic APIs without supplying transcript text", async () => {
+  const requests = [];
+  const gate = new VerifiedPasteGate({
+    binary: "/synthetic/verified-paste-gate",
+    spawnImpl: () => {
+      const child = new FakeChild();
+      const write = child.stdin.write;
+      child.stdin.write = (line) => { requests.push(JSON.parse(line)); write(line); };
+      return child;
+    },
+  });
+  try {
+    await gate.capture({ token: "manual" });
+    assert.equal((await gate.manualEnter({ token: "stale" })).reason, "stale_run");
+    assert.equal((await gate.manualEnter({ token: "manual" })).ok, true);
+    const manualRequest = requests.find(({ op }) => op === "manual_enter");
+    assert.ok(manualRequest);
+    assert.equal(Object.hasOwn(manualRequest, "expectedText"), false);
+    assert.equal((await gate.manualEnter({ token: "manual" })).reason, "already_consumed");
+    assert.equal((await gate.verifyAndEnter({ token: "manual", expectedText: "text" })).reason, "already_consumed");
+    assert.equal((await gate.capture({ token: "manual" })).reason, "already_consumed");
+    assert.equal(requests.filter(({ op }) => op.endsWith("enter")).length, 1);
+
+    await gate.capture({ token: "automatic" });
+    await gate.verifyAndEnter({ token: "automatic", expectedText: "text" });
+    assert.equal((await gate.manualEnter({ token: "automatic" })).reason, "already_consumed");
+  } finally { await gate.close(); }
+});
+
+test("manual Enter never queues behind or races an automatic Enter already in progress", async () => {
+  let child;
+  const requests = [];
+  const gate = new VerifiedPasteGate({
+    binary: "/synthetic/verified-paste-gate",
+    spawnImpl: () => {
+      child = new FakeChild();
+      const write = child.stdin.write;
+      child.stdin.write = (line) => {
+        const request = JSON.parse(line);
+        requests.push(request);
+        if (request.op === "capture") write(line);
+      };
+      return child;
+    },
+  });
+  await gate.capture({ token: "auto" });
+  const pending = gate.verifyAndEnter({ token: "auto", expectedText: "text" });
+  assert.equal((await gate.manualEnter({ token: "auto" })).reason, "enter_in_progress");
+  assert.equal((await gate.verifyAndEnter({ token: "auto", expectedText: "text" })).reason, "enter_in_progress");
+  assert.deepEqual(requests.map(({ op }) => op), ["capture", "verify_and_enter"]);
+  gate.cancel({ token: "auto" });
+  assert.equal((await pending).reason, "cancelled");
+  await gate.close();
+});
+
+test("new capture waits for confirmed termination of the cancelled proof helper", async () => {
+  const children = [];
+  class DeferredExitChild extends FakeChild {
+    kill(signal) { this.signal = signal; }
+  }
+  const gate = new VerifiedPasteGate({
+    binary: "/synthetic/verified-paste-gate",
+    spawnImpl: () => {
+      const child = children.length === 0 ? new DeferredExitChild() : new FakeChild();
+      children.push(child);
+      return child;
+    },
+  });
+  await gate.capture({ token: "old" });
+  gate.cancel({ token: "old" });
+  const recapture = gate.capture({ token: "new-manual" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(children[0].signal, "SIGKILL");
+  assert.equal(children.length, 1, "no second helper while old helper might still post");
+  assert.equal(gate.warm(), false);
+  children[0].emit("exit", null, "SIGKILL");
+  assert.equal((await recapture).ok, true);
+  assert.equal(children.length, 2);
+  assert.equal((await gate.manualEnter({ token: "new-manual" })).ok, true);
+  await gate.close();
+});
+
+test("unconfirmed termination fails closed instead of spawning a replacement", async () => {
+  let child;
+  let spawned = 0;
+  const gate = new VerifiedPasteGate({
+    binary: "/synthetic/verified-paste-gate",
+    commandTimeoutMs: 10,
+    spawnImpl: () => {
+      spawned += 1;
+      child = new FakeChild();
+      child.kill = () => {};
+      return child;
+    },
+  });
+  await gate.capture({ token: "old" });
+  gate.cancel({ token: "old" });
+  assert.equal((await gate.capture({ token: "new" })).reason, "helper_still_stopping");
+  assert.equal(spawned, 1);
+  assert.equal((await gate.manualEnter({ token: "new" })).reason, "stale_run");
+  child.emit("exit", null, "SIGKILL");
+  await gate.close();
+});
+
+test("cancellation during the termination wait cannot revive the new token", async () => {
+  let child;
+  let spawned = 0;
+  const gate = new VerifiedPasteGate({
+    binary: "/synthetic/verified-paste-gate",
+    spawnImpl: () => {
+      spawned += 1;
+      child = new FakeChild();
+      child.kill = () => {};
+      return child;
+    },
+  });
+  await gate.capture({ token: "old" });
+  gate.cancel({ token: "old" });
+  const recapture = gate.capture({ token: "new" });
+  gate.cancel({ token: "new" });
+  child.emit("exit", null, "SIGKILL");
+  assert.equal((await recapture).reason, "cancelled");
+  assert.equal(spawned, 1);
+  assert.equal((await gate.manualEnter({ token: "new" })).reason, "stale_run");
+  await gate.close();
 });

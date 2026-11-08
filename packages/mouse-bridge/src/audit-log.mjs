@@ -14,6 +14,7 @@ const STATUSES = new Set([
   "threshold_pending", "duplicate", "dropped", "closed", "ready", "unavailable", "cancelled",
 ]);
 const REASONS = new Set([
+  "manual_enter", "manual_posted", "send_not_ready", "send_context_lost", "empty_field", "helper_still_stopping", "enter_in_progress",
   "ok", "verified", "posted", "delivery_not_proven", "history_ts", "history", "clipboard",
   "helper_unavailable", "helper_error", "helper_exit", "helper_stdin_error", "helper_protocol",
   "app_missing", "focus_missing", "window_missing", "permission", "missing_permission",

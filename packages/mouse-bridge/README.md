@@ -8,9 +8,25 @@ small Swift event-tap child; G HUB does not need to run.
 | Front / G5 | Click to start, click to stop; send Return only after the completed transcript is proven in the original field. |
 | Back / G4 | Click to start, click to stop; insert text without Return. |
 
+After recording stops, the native route also accepts explicit short follow-up
+clicks on **either** side button. During processing, or within eight seconds of
+the last stop, a complete down/up pair of at most 350 ms requests one manual
+Return instead of restarting Aqua. Longer holds do nothing in this follow-up
+state. Once the window expires, an idle press starts a new recording.
+
 The button used to **stop** selects the action. A back-button stop also prevents
 Return after a front-button start. Aqua inserts at the cursor itself; no manual
 paste is needed. `AQUA_AUTO_SUBMIT=0` suppresses every automatic Return.
+
+Each manual Return requires a new click, a nonempty focused editable field and
+a collapsed cursor. The native helper captures the current destination and
+revalidates process, window, field, text and selection immediately before
+posting. An explicit manual request does not wait for an Aqua transcript. It
+cancels deferred automatic submission; an automatic Return already in flight
+or landing during the click consumes that click without a second key. No timer
+emits Return, and manual submission never releases Fn or toggles Aqua.
+`AQUA_AUTO_SUBMIT=0` also disables manual Return. The back recording stop remains
+text-only; a later explicit short click can request Return.
 
 ## Install
 
@@ -71,6 +87,11 @@ actions even when its assignment looks equivalent.
    process, window, focused field, value and cursor immediately before
    posting Return to the captured process. Electron accessibility is enabled
    through its normal `AXManualAccessibility` interface when needed.
+
+For automatic submission, a recognized Send control near the active composer
+is also checked. A recognized disabled or ambiguous control suppresses Return;
+the helper does not scan the whole page or click the button. Send-control
+readiness supplements the exact insertion and cursor proof.
 
 A delay, history timestamp, healthy endpoint or returned action name alone
 never authorizes Return. Missing/ambiguous histories, account/source changes,
@@ -139,6 +160,8 @@ npm run build:native-mouse-input
 received-input counts and control timing. `enterCount` means the helper posted
 Return after proof; the receiving application's submission remains a separate
 observation.
+`manualEnterAttempts` and `manualEnterCount` distinguish explicit manual
+requests from posted manual keys. These counters do not establish delivery.
 
 The automated tests exercise state transitions, retained-history rollover,
 source binding, helper failure/cancellation, protocol validation and child
@@ -148,6 +171,9 @@ real Aqua transcription and independent Return receipt is still pending.**
 Use a harmless local input field with a Return counter: front stop must produce
 exactly one Return; back stop must produce none; changing focus must suppress
 Return. A missing proof must stay visibly incomplete.
+The short-click path additionally needs physical checks of manual follow-ups
+on both buttons, long holds, an expired follow-up window, and an automatic
+Return arriving during a click. Those checks remain pending.
 
 The native hook is a child of the bridge and is stopped during bridge shutdown.
 It does not synthesize side-button events and does not claim that event source

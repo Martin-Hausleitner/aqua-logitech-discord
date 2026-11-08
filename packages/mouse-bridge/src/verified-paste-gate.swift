@@ -7,8 +7,8 @@ import Foundation
 //
 // The process accepts newline-delimited JSON on stdin. It never writes an AX
 // value, transcript, field name, or window title to stdout/stderr or disk.
-// The only key event it can emit is Enter, and only from verify_and_enter after
-// the same process has revalidated the captured AX state.
+// The only key event it can emit is Enter, from verify_and_enter or an explicit
+// manual_enter after this process has revalidated the captured AX destination.
 
 private let valueAttribute = kAXValueAttribute as CFString
 private let selectedRangeAttribute = kAXSelectedTextRangeAttribute as CFString
@@ -17,6 +17,8 @@ private let manualAccessibilityAttribute = "AXManualAccessibility" as CFString
 private let windowAttribute = kAXWindowAttribute as CFString
 private let roleAttribute = kAXRoleAttribute as CFString
 private let subroleAttribute = kAXSubroleAttribute as CFString
+private let parentAttribute = kAXParentAttribute as CFString
+private let childrenAttribute = kAXChildrenAttribute as CFString
 private let maxFieldBytes = 1_048_576
 private var manualAccessibilityAttemptedPids = Set<pid_t>()
 
@@ -177,7 +179,107 @@ private func readSnapshot() -> (snapshot: AXSnapshot?, reason: String) {
     return (AXSnapshot(pid: pid, element: focused, window: window, value: value, selection: selection), "ok")
 }
 
-private func verify(_ baseline: AXSnapshot, expectedText: String) -> (snapshot: AXSnapshot?, reason: String) {
+// A short label such as "Send" is only meaningful inside a known chat app.
+// Other apps must expose a specific message/prompt label. Neither a default
+// dialog button nor a containing window's title authorizes chat submission.
+private func isRecognizedSendLabel(_ label: String, bundleIdentifier: String) -> Bool {
+    let normalizedLabel = label.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").lowercased()
+    let specific: Set<String> = ["send message", "send prompt", "nachricht senden", "prompt senden"]
+    if specific.contains(normalizedLabel) { return true }
+    let chatBundles: Set<String> = ["com.openai.chat", "com.openai.codex"]
+    return chatBundles.contains(bundleIdentifier) && ["send", "senden"].contains(normalizedLabel)
+}
+
+private struct SendReadiness {
+    let recognized: Bool
+    let ready: Bool
+}
+
+private func sendReadiness(_ snapshot: AXSnapshot) -> SendReadiness {
+    let unknown = SendReadiness(recognized: false, ready: false)
+    let bundleIdentifier = NSRunningApplication(processIdentifier: snapshot.pid)?.bundleIdentifier ?? ""
+    let deadline = DispatchTime.now().uptimeNanoseconds + 120_000_000
+    func beforeDeadline() -> Bool { DispatchTime.now().uptimeNanoseconds < deadline }
+    func read(_ element: AXUIElement, _ name: CFString) -> CFTypeRef? {
+        guard beforeDeadline() else { return nil }
+        return attribute(element, name)
+    }
+    var ancestor = snapshot.element
+    var visitedAncestors: [AXUIElement] = [ancestor]
+    let boundaries: Set<String> = ["AXApplication", "AXWindow", "AXWebArea", "AXDialog", "AXSheet"]
+    let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSecureTextField"]
+    // Search the nearest small composer group, never the whole window/page.
+    // Both traversal depth and nodes are bounded even for malformed AX trees.
+    for _ in 0..<6 {
+        guard beforeDeadline() else { break }
+        AXUIElementSetMessagingTimeout(ancestor, 0.025)
+        guard let raw = read(ancestor, parentAttribute), CFGetTypeID(raw) == AXUIElementGetTypeID() else { break }
+        let parent = raw as! AXUIElement
+        if visitedAncestors.contains(where: { sameElement($0, parent) }) { break }
+        visitedAncestors.append(parent)
+        ancestor = parent
+        AXUIElementSetMessagingTimeout(parent, 0.025)
+        let parentRole = read(parent, roleAttribute) as? String ?? ""
+        if boundaries.contains(parentRole) { break }
+        var queue: [(AXUIElement, Int)] = [(parent, 0)]
+        var visited: [AXUIElement] = []
+        var buttons: [Bool] = []
+        var containsFocus = false
+        var otherTextFields = 0
+        var complete = true
+        while !queue.isEmpty {
+            guard beforeDeadline() else { complete = false; break }
+            let (element, depth) = queue.removeFirst()
+            if visited.contains(where: { sameElement($0, element) }) { continue }
+            guard visited.count < 96 else { complete = false; break }
+            visited.append(element)
+            AXUIElementSetMessagingTimeout(element, 0.025)
+            var elementPid: pid_t = 0
+            guard AXUIElementGetPid(element, &elementPid) == .success, elementPid == snapshot.pid else {
+                complete = false
+                break
+            }
+            let role = read(element, roleAttribute) as? String ?? ""
+            if sameElement(element, snapshot.element) {
+                containsFocus = true
+            } else if textRoles.contains(role) {
+                otherTextFields += 1
+            }
+            if role == "AXButton" {
+                let labels = [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute]
+                    .compactMap { read(element, $0 as CFString) as? String }
+                if labels.contains(where: { isRecognizedSendLabel($0, bundleIdentifier: bundleIdentifier) }) {
+                    let enabled = read(element, kAXEnabledAttribute as CFString) as? Bool == true
+                    let hidden = read(element, "AXHidden" as CFString) as? Bool == true
+                    buttons.append(enabled && !hidden)
+                }
+            }
+            var count: CFIndex = 0
+            guard beforeDeadline() else { complete = false; break }
+            let countResult = AXUIElementGetAttributeValueCount(element, childrenAttribute, &count)
+            if countResult == .attributeUnsupported || countResult == .noValue { continue }
+            guard countResult == .success else { complete = false; break }
+            if count == 0 { continue }
+            guard depth < 4, count <= 96 - visited.count - queue.count else { complete = false; break }
+            var children: CFArray?
+            guard beforeDeadline() else { complete = false; break }
+            guard AXUIElementCopyAttributeValues(element, childrenAttribute, 0, count, &children) == .success,
+                  let elements = children as? [AXUIElement] else { complete = false; break }
+            queue.append(contentsOf: elements.map { ($0, depth + 1) })
+        }
+        // A larger parent would mix unrelated controls or remain incomplete.
+        if otherTextFields > 0 { return unknown }
+        if !complete {
+            return SendReadiness(recognized: containsFocus && !buttons.isEmpty, ready: false)
+        }
+        if containsFocus && !buttons.isEmpty {
+            return SendReadiness(recognized: true, ready: buttons.count == 1 && buttons[0])
+        }
+    }
+    return unknown
+}
+
+private func verify(_ baseline: AXSnapshot, expectedText: String, requiresSendReadiness: inout Bool) -> (snapshot: AXSnapshot?, reason: String) {
     guard !expectedText.isEmpty else { return (nil, "missing_expected_text") }
     guard expectedText.utf8.count <= maxFieldBytes else { return (nil, "text_too_large") }
     guard let expected = expectedValue(from: baseline, insertedText: expectedText) else { return (nil, "missing_proof") }
@@ -195,6 +297,20 @@ private func verify(_ baseline: AXSnapshot, expectedText: String) -> (snapshot: 
     let prefix = (baseline.value as NSString).substring(to: baseline.selection.location) + expectedText
     let currentPrefix = (current.value as NSString).substring(to: current.selection.location)
     guard normalized(currentPrefix) == normalized(prefix) else { return (nil, "caret_mismatch") }
+    let send = sendReadiness(current)
+    requiresSendReadiness = requiresSendReadiness || send.recognized
+    if requiresSendReadiness && !send.ready { return (nil, "send_not_ready") }
+    return (current, "ok")
+}
+
+private func verifyManual(_ baseline: AXSnapshot) -> (snapshot: AXSnapshot?, reason: String) {
+    let result = readSnapshot()
+    guard let current = result.snapshot else { return (nil, result.reason) }
+    guard current.pid == baseline.pid else { return (nil, "app_changed") }
+    guard sameElement(current.window, baseline.window) else { return (nil, "window_changed") }
+    guard sameElement(current.element, baseline.element) else { return (nil, "focus_changed") }
+    guard !current.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return (nil, "empty_field") }
+    guard current.selection.length == 0 else { return (nil, "selection_not_collapsed") }
     return (current, "ok")
 }
 
@@ -226,6 +342,7 @@ private final class Gate {
     private var token: String?
     private var baseline: AXSnapshot?
     private var consumed = false
+    private var requiresSendReadiness = false
 
     func handle(_ request: Request) {
         guard !request.token.isEmpty else {
@@ -234,6 +351,10 @@ private final class Gate {
         }
         switch request.op {
         case "capture":
+            guard token != request.token || !consumed else {
+                response(for: request, ok: false, reason: "already_consumed")
+                return
+            }
             let result = readSnapshot()
             guard let snapshot = result.snapshot else {
                 response(for: request, ok: false, reason: result.reason)
@@ -242,6 +363,9 @@ private final class Gate {
             token = request.token
             baseline = snapshot
             consumed = false
+            // Capture is on the physical key path. Traverse composer controls
+            // only after a complete automatic paste proof, never before Fn.
+            requiresSendReadiness = false
             response(for: request, ok: true)
         case "verify_and_enter":
             guard token == request.token, let baseline else {
@@ -256,19 +380,25 @@ private final class Gate {
             let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(timeout) * 1_000_000
             var reason = "missing_proof"
             while DispatchTime.now().uptimeNanoseconds < deadline {
-                let result = verify(baseline, expectedText: request.expectedText ?? "")
+                let result = verify(baseline, expectedText: request.expectedText ?? "", requiresSendReadiness: &requiresSendReadiness)
                 reason = result.reason
                 if let snapshot = result.snapshot {
-                    // Keep the two existing reads on the success path. If a
-                    // lagging field changes between them, continue waiting for
-                    // a stable proof within the same deadline; no key has
-                    // been posted yet and no key is retried.
+                    // Recheck the complete proof and Send readiness before
+                    // posting. No key has been posted or retried while waiting.
                     guard let events = prepareEnterEvents() else {
                         response(for: request, ok: false, reason: "key_prepare_failed")
                         return
                     }
-                    let final = verify(baseline, expectedText: request.expectedText ?? "")
+                    let final = verify(baseline, expectedText: request.expectedText ?? "", requiresSendReadiness: &requiresSendReadiness)
                     if let finalSnapshot = final.snapshot, sameVerifiedState(snapshot, finalSnapshot) {
+                        // A Send-control traversal can outlive a focus change.
+                        // Re-read the destination after that traversal too.
+                        let emission = readSnapshot()
+                        guard let emissionSnapshot = emission.snapshot,
+                              sameVerifiedState(finalSnapshot, emissionSnapshot) else {
+                            response(for: request, ok: false, reason: emission.snapshot == nil ? emission.reason : "revalidation_failed")
+                            return
+                        }
                         guard DispatchTime.now().uptimeNanoseconds < deadline else {
                             response(for: request, ok: false, reason: "timeout")
                             return
@@ -286,11 +416,40 @@ private final class Gate {
                 usleep(15_000)
             }
             response(for: request, ok: false, reason: reason)
+        case "manual_enter":
+            guard token == request.token, let baseline else {
+                response(for: request, ok: false, reason: "stale_run")
+                return
+            }
+            guard !consumed else {
+                response(for: request, ok: false, reason: "already_consumed")
+                return
+            }
+            let first = verifyManual(baseline)
+            guard let snapshot = first.snapshot else {
+                response(for: request, ok: false, reason: first.reason)
+                return
+            }
+            guard let events = prepareEnterEvents() else {
+                response(for: request, ok: false, reason: "key_prepare_failed")
+                return
+            }
+            let final = verifyManual(baseline)
+            guard let finalSnapshot = final.snapshot, sameVerifiedState(snapshot, finalSnapshot) else {
+                response(for: request, ok: false, reason: final.snapshot == nil ? final.reason : "revalidation_failed")
+                return
+            }
+            consumed = true
+            // This helper only posts Return. It does not release Fn or invoke
+            // Aqua's recording cancellation/stop controls.
+            postEnter(events, to: baseline.pid)
+            response(for: request, ok: true)
         case "cancel":
             if token == request.token {
                 token = nil
                 baseline = nil
                 consumed = false
+                requiresSendReadiness = false
             }
             response(for: request, ok: true)
         default:

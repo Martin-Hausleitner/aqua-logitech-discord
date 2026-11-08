@@ -34,6 +34,19 @@ from status/log evidence.
 
 ## Verification
 
+The native route now classifies complete short follow-up clicks separately
+from recording toggles. Processing or a recent stop (eight seconds) arms the
+follow-up meaning; at most 350 ms between native down/up timestamps requests a
+manual Return on either button. No repeat timer is used. A manual request
+cancels deferred automatic submission. An automatic key already in flight or
+posted during the click consumes the request without another key.
+
+Manual Return uses a fresh current-field capture and stable native destination
+proof, without requiring a transcript or issuing Fn controls. Automatic Return
+retains its exact transcript/cursor proof and adds a bounded nearby send-control
+readiness check. Counters distinguish manual requests from posted manual keys;
+neither proves receipt.
+
 Run the isolated package tests, compile Swift helpers without starting them,
 validate this change strictly and inspect the exact publication patch. Automated
 results are distinct from physical acceptance. A physical test must use a harmless

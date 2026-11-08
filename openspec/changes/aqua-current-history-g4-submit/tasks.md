@@ -9,10 +9,13 @@
 - [x] Use acknowledged warm Fn control with release ownership across helper failures.
 - [x] Require a stable collapsed cursor at the insertion boundary before Return.
 - [x] Add bounded private audit, validated local webhook and independently owned repair jobs.
+- [x] Add explicit short follow-up Return on both buttons without a recording restart or repeat timer.
+- [x] Revalidate manual destinations and coordinate manual requests with automatic Return.
+- [x] Check recognized nearby send controls before automatic Return.
 
 ## 2. Validate
 
-- [x] Run the isolated package regression suite in the publication candidate (185 tests passed).
+- [x] Run the isolated package regression suite in the publication candidate (211 tests passed, including short follow-ups and manual destination proof).
 - [x] Compile the native input, HID and paste helpers without starting them.
 - [x] Run strict OpenSpec validation and publication diff/privacy checks.
 - [x] Independently review input ownership, shutdown, proof timing, audit and repair concurrency.
@@ -22,3 +25,5 @@
 - [ ] Observe physical front/G5 start, real Aqua transcription and front/G5 stop with exactly one Return received independently.
 - [ ] Observe physical back/G4 stop with real text inserted and no Return, including after a front-button start.
 - [ ] Observe focus change suppressing Return and verify no competing side-button dispatcher.
+- [ ] Observe short follow-ups on both buttons, long holds, expiry and overlap with automatic Return without a second key.
+- [ ] Confirm current macOS Accessibility permission and functional native input before physical acceptance.

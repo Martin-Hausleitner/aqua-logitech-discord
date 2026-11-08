@@ -1,3 +1,4 @@
+import { createShortClickInput } from "./short-click-input.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
@@ -23,6 +24,8 @@ const controllerSource = [
   source.slice(autoEnterStart, controlsEnd),
   `globalThis.__bridge = {
     handleEvent,
+    requestManualEnter,
+    shortClickInput,
     beginShutdown,
     recoverUnavailableNativeInput,
     metrics: () => ({ ...metrics }),
@@ -71,6 +74,7 @@ function makeHarness(overrides = {}) {
       gateCalls.push({ op: "verifyAndEnter", token, expectedText });
       return { ok: true, reason: "verified" };
     },
+    manualEnter: async ({token}) => { gateCalls.push({op:"manualEnter",token}); return {ok:true,reason:"manual_posted"}; },
     cancel: ({ token }) => {
       gateCalls.push({ op: "cancel", token });
     },
@@ -89,6 +93,7 @@ function makeHarness(overrides = {}) {
       env: { AQUA_AUTO_ENTER_APPS: "codex", AQUA_AUTO_ENTER_TITLES: "" },
       hrtime: { bigint: () => 0n },
     },
+    createShortClickInput,
     createMachine,
     reduce,
     shouldSubmit,
@@ -603,4 +608,63 @@ test("terminal loss cancels a deferred PTT proof or settle without releasing an 
       assert.equal(gateCalls.some(({ op }) => op === "verifyAndEnter"), false);
     }
   }
+});
+
+
+test("manual click aborts settle without restarting and stale settle cannot send", async () => {
+  const {bridge,settleCalls,gateCalls,hidCalls}=makeHarness();
+  await bridge.handleEvent("BUTTON_SEND_TAP");
+  const stop=bridge.handleEvent("BUTTON_SEND_TAP");
+  await waitFor(()=>settleCalls.length===1);
+  assert.equal((await bridge.requestManualEnter("front")).ok,true);
+  assert.equal(settleCalls[0].options.signal.aborted,true);
+  settleCalls[0].gate.resolve({ok:true,reason:"history_ts",waitedMs:1});
+  await stop;
+  assert.equal(bridge.state().mode,"idle");
+  assert.equal(bridge.state().busy,false);
+  assert.equal(gateCalls.filter(x=>x.op==="manualEnter").length,1);
+  assert.equal(gateCalls.filter(x=>x.op==="verifyAndEnter").length,0);
+  assert.equal(hidCalls.filter(x=>x[0]==="fn-down").length,1);
+});
+
+test("manual Enter is suppressed while automatic native Enter is in flight", async () => {
+  const proof=deferred(); let verifying=false;let manualCalls=0;
+  const {bridge,settleCalls}=makeHarness({pasteGate:{
+    capture:async()=>({ok:true}),cancel:()=>{},close:async()=>{},
+    verifyAndEnter:async()=>{verifying=true;return proof.promise;},
+    manualEnter:async()=>{manualCalls++;return {ok:true};},
+  }});
+  await bridge.handleEvent("BUTTON_SEND_TAP"); const stop=bridge.handleEvent("BUTTON_SEND_TAP");
+  await waitFor(()=>settleCalls.length===1);
+  settleCalls[0].gate.resolve({ok:true,reason:"history_ts",waitedMs:1});
+  await waitFor(()=>verifying);
+  assert.equal((await bridge.requestManualEnter("back")).reason,"input_busy");
+  proof.resolve({ok:true});await stop;assert.equal(manualCalls,0);assert.equal(bridge.metrics().enterCount,1);
+});
+
+test("manual Enter does not stop a recording or bypass preview",async()=>{
+  const h=makeHarness();await h.bridge.handleEvent("BUTTON_SEND_TAP");
+  assert.equal((await h.bridge.requestManualEnter("front")).reason,"input_busy");
+  assert.equal(h.bridge.state().mode,"toggle_recording");
+  const preview=makeHarness({autoSubmit:false});
+  assert.equal((await preview.bridge.requestManualEnter("front")).reason,"preview");
+});
+
+test('native input loss cancels an in-flight manual token without emitting a Fn command',async()=>{
+  const proof=deferred();let verifying=false;const cancelled=[];
+  const gate={activeToken:null,capture:async({token})=>{gate.activeToken=token;return {ok:true};},manualEnter:async()=>{verifying=true;return proof.promise;},cancel:({token})=>cancelled.push(token),close:async()=>{}};
+  const {bridge,hidCalls}=makeHarness({pasteGate:gate});
+  const manual=bridge.requestManualEnter('front');await waitFor(()=>verifying);
+  await bridge.recoverUnavailableNativeInput({fnHeld:false,fnRecoveryRequired:false});
+  assert.ok(cancelled.includes(gate.activeToken));
+  proof.resolve({ok:false,reason:'cancelled'});await manual;
+  assert.equal(bridge.metrics().enterCount,0);assert.equal(bridge.state().busy,false);assert.deepEqual(hidCalls,[]);
+});
+
+test('cancel during manual capture prevents issuing manual Enter',async()=>{
+  const capture=deferred();let started=false;let enters=0;
+  const gate={activeToken:null,capture:async({token})=>{started=true;gate.activeToken=token;return capture.promise;},manualEnter:async()=>{enters++;return {ok:true};},cancel:()=>{},close:async()=>{}};
+  const {bridge}=makeHarness({pasteGate:gate});
+  const manual=bridge.requestManualEnter('back');await waitFor(()=>started);
+  await bridge.handleEvent('CANCEL');capture.resolve({ok:true});await manual;assert.equal(enters,0);assert.equal(bridge.state().busy,false);
 });
