@@ -132,8 +132,26 @@ def list_audio_files(data_dir: Path) -> list[dict]:
 
 # ── Extraction ─────────────────────────────────────────────────────────────────
 
-def extract_history(settings: dict) -> list[dict]:
-    return settings.get("history", [])
+def extract_history(settings: dict, data_dir: Path | None = None) -> list[dict]:
+    hist = settings.get("history", [])
+    if hist:
+        return hist
+    # Newer app versions (>= 2026-09) moved history out of settings.json
+    # into history.json -> {"historyByUserId": {"<uid>": [ ... ]}} (rolling 100).
+    if data_dir is not None:
+        hp = data_dir / "history.json"
+        if hp.exists():
+            try:
+                with open(hp, encoding="utf-8") as f:
+                    hj = json.load(f)
+                merged: list[dict] = []
+                for _uid, items in (hj.get("historyByUserId") or {}).items():
+                    merged.extend(items)
+                merged.sort(key=lambda x: x.get("timestamp", ""))
+                return merged
+            except (OSError, ValueError):
+                pass
+    return []
 
 
 def extract_config(settings: dict) -> dict:
@@ -334,7 +352,7 @@ def main():
     audio_files = [] if args.no_audio_list else list_audio_files(data_dir)
 
     # Extract
-    history = extract_history(settings)
+    history = extract_history(settings, data_dir)
     config = extract_config(settings)
     devices = extract_devices(mic_timings)
     daily = compute_daily_stats(history)
