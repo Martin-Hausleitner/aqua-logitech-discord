@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/bin/curl --fail --silent --show-error --max-time 50 -X POST http://127.0.0.1:8690/button/back >/dev/null

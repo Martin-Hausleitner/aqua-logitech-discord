@@ -1,4 +1,19 @@
-# G HUB → mouse-bridge: the ONE physical ingress route
+# G HUB → mouse-bridge: current physical routes
+
+Current assignment, verified in the real G HUB device view on 2026-11-05:
+
+| Physical button | Background app | Endpoint | Stop behavior |
+|---|---|---|---|
+| Front / G5 | `apps/AquaSend.app` | `POST /button/front` | Exact native paste proof, then Return |
+| Back / G4 | `apps/AquaDictate.app` | `POST /button/back` | Aqua inserts text; never Return |
+
+Each button starts/stops the same Aqua recording. The stopping button chooses
+whether to send. Both app bundles have `LSUIElement=true`; they must not open
+Terminal or steal the original input focus. The saved OpenLogi Back/Forward
+bindings for this mouse were backed up and removed so G HUB is the sole
+physical dispatcher. Do not add a direct Aqua mouse binding or Enter macro.
+
+## Historical legacy route
 
 Manifest route id: `g4-aquabutton1-button1.sh-8690`.
 
