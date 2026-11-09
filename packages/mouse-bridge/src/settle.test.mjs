@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFreshTranscription, snapshotSignals, waitUntilSettled } from "./settle.mjs";
+import { captureCompletionAnchor } from "./provider-empty-completion.mjs";
 
 test("settle waits for history_ts — not wav/quiet", async () => {
   let recording = true;
@@ -456,4 +457,50 @@ test("settle rejects a changed source even if its timestamp is newer", async () 
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, "history_source_changed");
+});
+
+test("an anchored empty provider completion ends the otherwise 45-second wait without authorizing Enter", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "aqua-empty-settle-"));
+  const completionLogPath = join(directory, "main.log");
+  const now = Date.now() - 10_000;
+  const line = (at, event, fields) => `[${new Date(at).toISOString()}] [info]  (DictationOrchestrator) dictation.${event} ${fields}\n`;
+  try {
+    writeFileSync(completionLogPath, "");
+    const providerStart = captureCompletionAnchor({ logPath: completionLogPath, now: () => now });
+    appendFileSync(completionLogPath, line(now + 10, "start_accepted", "lease_id=82"));
+    const providerStop = captureCompletionAnchor({ logPath: completionLogPath, now: () => now + 600 });
+    appendFileSync(completionLogPath, line(now + 1000, "completed", "audio_duration_s=0.437 auto_enter=false has_audio_data=true lease_id=82 session_id=9001 text_length=0"));
+    const unchangedHistory = { historyValid: true, historyTs: "2026-11-09T00:00:00.000Z", historySource: "synthetic", historyTranscriptionCount: 100 };
+    let elapsed = 0;
+    const options = {
+      isRecording: () => false, readSignals: () => ({ ...unchangedHistory }),
+      baseline: { signals: unchangedHistory }, minAfterStopMs: 0, postTranscriptMs: 0, maxWaitMs: 45_000,
+      now: () => elapsed, sleep: async (milliseconds) => { elapsed += milliseconds; },
+    };
+    const oldContract = await waitUntilSettled(options);
+    assert.deepEqual(oldContract, { ok: false, reason: "timeout", waitedMs: 45_000 });
+    elapsed = 0;
+    const empty = await waitUntilSettled({ ...options, completionLogPath,
+      baseline: { signals: { ...unchangedHistory, providerCompletionAnchor: providerStop } },
+      recordingBaseline: { ...unchangedHistory, providerCompletionAnchor: providerStart },
+    });
+    assert.deepEqual(empty, { ok: false, reason: "empty_completion", empty: true, terminal: true, waitedMs: 0 });
+    assert.equal(empty.ok, false, "empty terminal state never passes the Enter-ready contract");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("abort and recording state take precedence over an empty provider indication", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let reads = 0;
+  const aborted = await waitUntilSettled({ isRecording: () => false, readSignals: () => ({}),
+    readEmptyCompletion: () => { reads++; return { ok: true, reason: "empty_completion" }; }, signal: controller.signal });
+  assert.equal(aborted.reason, "aborted");
+  assert.equal(reads, 0);
+  let elapsed = 0;
+  const recording = await waitUntilSettled({ isRecording: () => true, readSignals: () => ({}),
+    readEmptyCompletion: () => { reads++; return { ok: true, reason: "empty_completion" }; },
+    maxWaitMs: 30, now: () => elapsed, sleep: async (milliseconds) => { elapsed += milliseconds; } });
+  assert.equal(recording.reason, "timeout");
+  assert.equal(reads, 0);
 });

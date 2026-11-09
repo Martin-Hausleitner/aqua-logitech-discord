@@ -29,7 +29,7 @@ const REASONS = new Set([
   "policy_skip", "app_not_allowlisted", "stale_run", "already_consumed", "missing_token",
   "history_invalid", "history_schema", "history_source_changed", "history_timestamp_tie",
   "history_not_fresh", "history_ambiguous", "missing_baseline", "missing_recording_baseline",
-  "invalid_baseline", "native_input_unavailable", "native_ready_timeout", "native_restart_limit",
+  "invalid_baseline", "empty_completion", "native_input_unavailable", "native_ready_timeout", "native_restart_limit",
   "native_denied", "tcc_denied", "ready_timeout", "protocol_overflow", "diagnostic_overflow",
   "dispatch_failed", "spawn_failed", "child_error", "child_exit", "restart_limit", "tap_disabled",
   "tap_retry_exhausted", "tap_retry_failed", "tap_create_failed", "output_unavailable", "parent_exited",

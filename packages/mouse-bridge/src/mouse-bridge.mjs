@@ -656,6 +656,8 @@ async function runActions(actions) {
         transcriptBaseline = null;
         pasteRun = await capturePasteFocus(generation, auditContext);
         if (generation !== inputGeneration) return;
+        if (!DRY) transcriptStartBaseline = { ...transcriptStartBaseline,
+          providerCompletionAnchor: snapshotSignals({ includeAudio: false, includeCompletionAnchor: true }).providerCompletionAnchor };
         log(a, `mode=${TOGGLE_MODE}`);
         notifySameButton(true);
         if (TOGGLE_MODE === "f19") await hid(process.env.AQUA_LOCK_HID ?? "f19");
@@ -667,7 +669,7 @@ async function runActions(actions) {
         break;
       case "TOGGLE_STOP":
         stopRequestedAt = Date.now();
-        if (!DRY) transcriptBaseline = snapshotSignals({ includeAudio: false });
+        if (!DRY) transcriptBaseline = snapshotSignals({ includeAudio: false, includeCompletionAnchor: true });
         log(a, `mode=${TOGGLE_MODE}`);
         notifySameButton(false);
         if (TOGGLE_MODE === "f19") await hid(process.env.AQUA_LOCK_HID ?? "f19");
@@ -679,6 +681,8 @@ async function runActions(actions) {
         transcriptBaseline = null;
         pasteRun = await capturePasteFocus(generation, auditContext);
         if (generation !== inputGeneration) return;
+        if (!DRY) transcriptStartBaseline = { ...transcriptStartBaseline,
+          providerCompletionAnchor: snapshotSignals({ includeAudio: false, includeCompletionAnchor: true }).providerCompletionAnchor };
         log(a);
         notifySameButton(true);
         await hid("fn-down");
@@ -686,7 +690,7 @@ async function runActions(actions) {
         break;
       case "PTT_UP":
         stopRequestedAt = Date.now();
-        if (!DRY) transcriptBaseline = snapshotSignals({ includeAudio: false });
+        if (!DRY) transcriptBaseline = snapshotSignals({ includeAudio: false, includeCompletionAnchor: true });
         log(a);
         notifySameButton(false);
         await hid("fn-up");
@@ -704,6 +708,7 @@ async function runActions(actions) {
           isRecording: () => aquaRecording,
           readSignals: () => snapshotSignals({ includeAudio: false }),
           baseline: transcriptBaseline ? { signals: transcriptBaseline } : undefined,
+          recordingBaseline: transcriptStartBaseline,
           signal: settleAbort.signal,
           maxWaitMs: Number(process.env.AQUA_SETTLE_TIMEOUT_MS ?? 45000),
           pollMs: 15,
@@ -715,9 +720,10 @@ async function runActions(actions) {
         });
         if (currentSettleAbort === settleAbort) currentSettleAbort = null;
         if (generation !== inputGeneration) return;
+        const emptyCompletion = settle.reason === "empty_completion" && settle.empty === true && settle.terminal === true;
         // Fn-up and the transcript wait run independently of the initial draft
         // operation. Only the final paste proof must await its confirmed rebase.
-        if (pasteRun?.initialEnterPromise) {
+        if (!emptyCompletion && pasteRun?.initialEnterPromise) {
           await pasteRun.initialEnterPromise;
           if (generation !== inputGeneration) return;
           if (activePasteGateRun !== pasteRun || pasteRun.generation !== generation || pasteRun.rebaseReady !== true) {
@@ -732,8 +738,18 @@ async function runActions(actions) {
         metrics.lastLatencyMs = settle.waitedMs;
         metrics.totalLatencyMs += settle.waitedMs;
         metrics.avgLatencyMs = Math.round(metrics.totalLatencyMs / metrics.settleCount);
-        audit("settle", auditContext, { status: settle.ok ? "ok" : "failed",
+        audit("settle", auditContext, { status: emptyCompletion ? "suppressed" : settle.ok ? "ok" : "failed",
           reason: sanitizeReasonCode(settle.reason), durationMs: settle.waitedMs });
+
+        if (emptyCompletion) {
+          audit("suppressed", auditContext, { status: "suppressed", reason: "empty_completion" });
+          // A pending initial native operation must not outlive this terminal
+          // run. Abort its token before finalizing; no late post or retry.
+          pasteRun?.initialAbort?.abort();
+          finishPasteGateRun(pasteRun);
+          machine = reduce(machine, { type: "SETTLE_DONE" }).state;
+          return;
+        }
 
         if (!settle.ok) {
           metrics.timeoutCount++;

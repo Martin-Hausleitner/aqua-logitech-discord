@@ -277,6 +277,88 @@ test("one completed transcription emits exactly one Enter", async () => {
   assert.deepEqual(gateCalls.filter(({ op }) => op === "verifyAndEnter").map(({ expectedText }) => expectedText), ["synthetic transcript"]);
 });
 
+test("empty completion becomes idle without native Enter or repair even after a processing submit click", async () => {
+  for (const start of ["BUTTON_SEND_TAP", "BUTTON_DICTATE_TAP"]) {
+    const { bridge, settleCalls, gateCalls, repairEvents, auditEvents } = makeHarness();
+    await bridge.handleEvent(start);
+    const stop = bridge.handleEvent(start);
+    await waitFor(() => settleCalls.length === 1);
+    const click = await bridge.requestManualEnter("front");
+    assert.equal(click.reason, "awaiting_transcript");
+    assert.ok(settleCalls[0].options.recordingBaseline);
+    settleCalls[0].gate.resolve({ ok: false, reason: "empty_completion", empty: true, terminal: true, waitedMs: 388 });
+    await stop;
+    assert.equal(bridge.state().mode, "idle");
+    assert.equal(bridge.state().busy, false);
+    assert.equal(bridge.metrics().timeoutCount, 0);
+    assert.equal(bridge.metrics().enterCount, 0);
+    assert.equal(gateCalls.some(({ op }) => op === "verifyAndEnter" || op === "manualEnter"), false);
+    assert.equal(repairEvents.length, 0);
+    assert.equal(auditEvents.some(({ reason, status }) => reason === "empty_completion" && status === "suppressed"), true);
+  }
+});
+
+test("the provider start anchor is captured after native focus capture without moving the history baseline", async () => {
+  const capture = deferred();
+  let captureStarted = false;
+  let anchorReads = 0;
+  let historyReads = 0;
+  const { bridge, settleCalls } = makeHarness({
+    snapshotSignals: (options) => options.includeCompletionAnchor
+      ? { historyTs: "later", historySessionIds: [99], providerCompletionAnchor: { marker: ++anchorReads } }
+      : { historyTs: "before-capture", historySessionIds: [++historyReads] },
+    pasteGate: { capture: () => { captureStarted = true; return capture.promise; }, cancel() {} },
+  });
+  const start = bridge.handleEvent("BUTTON_SEND_TAP");
+  await waitFor(() => captureStarted);
+  assert.equal(anchorReads, 0, "external lifecycle during focus capture cannot enter the provider interval");
+  capture.resolve({ ok: true });
+  await start;
+  assert.equal(anchorReads, 1);
+  const stop = bridge.handleEvent("BUTTON_SEND_TAP");
+  await waitFor(() => settleCalls.length === 1);
+  assert.deepEqual(settleCalls[0].options.recordingBaseline.historySessionIds, [1]);
+  assert.equal(settleCalls[0].options.recordingBaseline.providerCompletionAnchor.marker, 1);
+  assert.equal(settleCalls[0].options.baseline.signals.providerCompletionAnchor.marker, 2);
+  settleCalls[0].gate.resolve({ ok: false, reason: "empty_completion", empty: true, terminal: true, waitedMs: 0 });
+  await stop;
+});
+
+test("empty completion aborts pending initial rebasing without waiting or reporting a repair", async () => {
+  for (const initialState of ["pending", "failed"]) {
+    const initial = deferred();
+    let initialSignal;
+    let cancels = 0;
+    let finalVerifications = 0;
+    const { bridge, settleCalls, repairEvents } = makeHarness({ pasteGate: {
+      capture: async () => ({ ok: true }),
+      initialEnterAndRebase: ({ signal }) => {
+        initialSignal = signal;
+        return initialState === "failed" ? Promise.resolve({ ok: false, reason: "rebase_timeout", posted: false, rebaseReady: false }) : initial.promise;
+      },
+      verifyAndEnter: async () => { finalVerifications++; return { ok: true }; },
+      cancel: () => { cancels++; },
+    } });
+    await bridge.handleEvent("BUTTON_SEND_TAP");
+    const initialRequest = bridge.requestInitialEnter("front", bridge.owner());
+    await waitFor(() => initialSignal);
+    if (initialState === "failed") await initialRequest;
+    const stop = bridge.handleEvent("BUTTON_SEND_TAP");
+    await waitFor(() => settleCalls.length === 1);
+    settleCalls[0].gate.resolve({ ok: false, reason: "empty_completion", empty: true, terminal: true, waitedMs: 0 });
+    await stop;
+    assert.equal(initialSignal.aborted, true);
+    assert.equal(bridge.state().mode, "idle");
+    assert.equal(bridge.state().busy, false);
+    assert.equal(finalVerifications, 0);
+    assert.equal(repairEvents.length, 0);
+    assert.ok(cancels > 0);
+    initial.resolve({ ok: false, reason: "cancelled", posted: false, rebaseReady: false });
+    await initialRequest;
+    assert.equal(finalVerifications, 0);
+  }
+});
+
 test("cancel during foreground-app lookup suppresses late Enter", async () => {
   const lookup = deferred();
   let lookupStarted = false;

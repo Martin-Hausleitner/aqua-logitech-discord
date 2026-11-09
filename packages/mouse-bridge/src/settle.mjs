@@ -22,6 +22,7 @@ import { readFileSync, statSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
+import { captureCompletionAnchor, readFreshEmptyCompletion } from "./provider-empty-completion.mjs";
 
 const AQUA_DIR = join(homedir(), "Library/Application Support/Aqua Voice");
 const AUDIO_DIR = join(AQUA_DIR, "audio");
@@ -249,6 +250,8 @@ export function snapshotSignals({
   aquaDir = AQUA_DIR,
   includeAudio = true,
   cache = defaultHistoryCache,
+  includeCompletionAnchor = false,
+  completionLogPath,
 } = {}) {
   const history = selectedHistorySnapshot({ historyPath, aquaDir, cache });
   return {
@@ -261,6 +264,7 @@ export function snapshotSignals({
     historySessionId: history.historySessionId,
     historySessionIds: history.historySessionIds,
     historyTranscriptionCount: history.historyTranscriptionCount,
+    ...(includeCompletionAnchor ? { providerCompletionAnchor: captureCompletionAnchor({ logPath: completionLogPath }) } : {}),
     at: Date.now(),
   };
 }
@@ -340,6 +344,9 @@ export async function waitUntilSettled(opts) {
     readSignals,
     readClipboard,
     baseline: explicitBaseline,
+    recordingBaseline,
+    completionLogPath,
+    readEmptyCompletion,
     signal,
     minAfterStopMs = 25,
     postTranscriptMs = 60,
@@ -413,6 +420,18 @@ export async function waitUntilSettled(opts) {
         : false;
 
     const afterStop = stoppedAt != null && Date.now() - stoppedAt >= minAfterStopMs;
+
+    if (!recording && afterStop) {
+      const empty = readEmptyCompletion
+        ? readEmptyCompletion()
+        : readFreshEmptyCompletion({ start: recordingBaseline?.providerCompletionAnchor,
+            stop: baseline.providerCompletionAnchor, logPath: completionLogPath });
+      if (empty?.ok === true && empty.reason === "empty_completion") {
+        // A bound empty provider completion proves only that this session is
+        // over. It supplies no expected text and can never authorize Return.
+        return { ok: false, reason: "empty_completion", empty: true, terminal: true, waitedMs: now() - t0 };
+      }
+    }
 
     if (!recording && afterStop && transcriptAt == null) {
       if (histTsAdvanced) {
