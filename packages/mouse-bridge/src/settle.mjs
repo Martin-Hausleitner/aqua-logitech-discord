@@ -22,7 +22,7 @@ import { readFileSync, statSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
-import { captureCompletionAnchor, readFreshEmptyCompletion } from "./provider-empty-completion.mjs";
+import { captureCompletionAnchor, readFreshEmptyCompletion, readFreshCompletion } from "./provider-empty-completion.mjs";
 
 const AQUA_DIR = join(homedir(), "Library/Application Support/Aqua Voice");
 const AUDIO_DIR = join(AQUA_DIR, "audio");
@@ -279,6 +279,8 @@ export function readFreshTranscription({
   aquaDir = AQUA_DIR,
   baseline,
   recordingBaseline = null,
+  requireProviderCompletion = false,
+  completionLogPath,
   cache = defaultHistoryCache,
 } = {}) {
   const snapshot = selectedHistorySnapshot({ historyPath, aquaDir, cache });
@@ -317,6 +319,12 @@ export function readFreshTranscription({
   if (typeof latest.content !== "string" || latest.content.length === 0) {
     return { ok: false, reason: "missing_expected_text" };
   }
+  if (requireProviderCompletion) {
+    const completion = readFreshCompletion({ start: recordingBaseline?.providerCompletionAnchor,
+      stop: baseline.providerCompletionAnchor, logPath: completionLogPath });
+    if (!completion.ok || completion.textLength <= 0) return { ok: false, reason: "provider_completion_unproven" };
+    if (completion.sessionId !== latest.sessionId) return { ok: false, reason: "provider_session_mismatch" };
+  }
   return { ok: true, text: latest.content };
 }
 
@@ -347,6 +355,7 @@ export async function waitUntilSettled(opts) {
     recordingBaseline,
     completionLogPath,
     readEmptyCompletion,
+    requireProviderCompletion = false,
     signal,
     minAfterStopMs = 25,
     postTranscriptMs = 60,
@@ -421,8 +430,16 @@ export async function waitUntilSettled(opts) {
 
     const afterStop = stoppedAt != null && Date.now() - stoppedAt >= minAfterStopMs;
 
+    const completion = requireProviderCompletion && !recording && afterStop
+      ? readFreshCompletion({ start: recordingBaseline?.providerCompletionAnchor,
+          stop: baseline.providerCompletionAnchor, logPath: completionLogPath }) : null;
+    const boundHistory = !requireProviderCompletion || (completion?.ok === true &&
+      completion.textLength > 0 && completion.sessionId === sig.historySessionId);
+
     if (!recording && afterStop) {
-      const empty = readEmptyCompletion
+      const empty = requireProviderCompletion
+        ? { ok: completion?.ok === true && completion.textLength === 0, reason: "empty_completion" }
+        : readEmptyCompletion
         ? readEmptyCompletion()
         : readFreshEmptyCompletion({ start: recordingBaseline?.providerCompletionAnchor,
             stop: baseline.providerCompletionAnchor, logPath: completionLogPath });
@@ -433,7 +450,7 @@ export async function waitUntilSettled(opts) {
       }
     }
 
-    if (!recording && afterStop && transcriptAt == null) {
+    if (!recording && afterStop && boundHistory && transcriptAt == null) {
       if (histTsAdvanced) {
         transcriptAt = now();
         transcriptReason = "history_ts";
@@ -454,6 +471,7 @@ export async function waitUntilSettled(opts) {
       stoppedAt != null &&
       afterStop &&
       transcriptAt != null &&
+      boundHistory &&
       now() - transcriptAt >= postTranscriptMs
     ) {
       const waitedMs = now() - t0;
@@ -462,7 +480,7 @@ export async function waitUntilSettled(opts) {
     }
 
     if (
-      allowQuietFallback &&
+      allowQuietFallback && !requireProviderCompletion &&
       !recording &&
       stoppedAt != null &&
       afterStop &&

@@ -63,8 +63,8 @@ function parseLifecycleLine(line) {
   return { type: "completed", lease, at, session, textLength, duration };
 }
 
-/** Proves only a terminal empty result. It can never authorize Return. */
-export function readFreshEmptyCompletion({ start, stop, logPath = DEFAULT_LOG,
+/** Bounded lifecycle metadata only. A completion alone never authorizes Return. */
+export function readFreshCompletion({ start, stop, logPath = DEFAULT_LOG,
   maxBytes = 131_072, maxLineBytes = 4096, now = Date.now } = {}) {
   const unproven = () => ({ ok: false, reason: "completion_unproven" });
   const source = sourceFor(logPath);
@@ -84,7 +84,7 @@ export function readFreshEmptyCompletion({ start, stop, logPath = DEFAULT_LOG,
     const key = [source, start.dev, start.ino, start.offset, start.at, stop.offset, stop.at, before.size, before.mtimeMs, before.ctimeMs, maxBytes, maxLineBytes].join(":");
     if (cache.has(key)) {
       const cached = cache.get(key);
-      return cached.provenAt !== null && cached.provenAt <= instant ? { ok: true, reason: "empty_completion" } : unproven();
+      return cached.proof && cached.proof.at <= instant ? { ...cached.proof, ok: true, reason: "provider_completion" } : unproven();
     }
     const buffer = Buffer.alloc(before.size - start.offset);
     if (readSync(descriptor, buffer, 0, buffer.length, start.offset) !== buffer.length) return unproven();
@@ -100,17 +100,25 @@ export function readFreshEmptyCompletion({ start, stop, logPath = DEFAULT_LOG,
     const previous = parse(beforeStop);
     const current = parse(afterStop);
     const starts = previous.filter(({ type }) => type === "start");
-    let provenAt = null;
+    let proof = null;
     if (!previous.some(({ invalid }) => invalid) && !current.some(({ invalid }) => invalid)
         && previous.length === starts.length && starts.length > 0 && new Set(starts.map(({ lease }) => lease)).size === 1 && current.length === 1
         && current[0].type === "completed" && current[0].lease === starts[0].lease
         && starts.every(({ at }) => at >= start.at && at <= stop.at)
-        && current[0].at >= stop.at && current[0].textLength === 0) {
-      provenAt = current[0].at;
+        && current[0].at >= stop.at) {
+      proof = { at: current[0].at, leaseId: current[0].lease, sessionId: current[0].session, textLength: current[0].textLength };
     }
     if (cache.size >= 16) cache.clear();
-    cache.set(key, { provenAt });
-    return provenAt !== null && provenAt <= instant ? { ok: true, reason: "empty_completion" } : unproven();
+    cache.set(key, { proof });
+    return proof && proof.at <= instant ? { ...proof, ok: true, reason: "provider_completion" } : unproven();
   } catch { return unproven(); }
   finally { if (descriptor !== undefined) closeSync(descriptor); }
+}
+
+/** Preserve the empty-only contract: terminal suppression, never Return. */
+export function readFreshEmptyCompletion(options) {
+  const completion = readFreshCompletion(options);
+  return completion.ok && completion.textLength === 0
+    ? { ok: true, reason: "empty_completion" }
+    : { ok: false, reason: "completion_unproven" };
 }

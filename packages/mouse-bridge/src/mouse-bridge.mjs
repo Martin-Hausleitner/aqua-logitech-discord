@@ -185,21 +185,27 @@ function connectWatch() {
       log("no WebSocket global — install Node 22+ or link ws; settle falls back to file signals only");
       return;
     }
-    watchWs = new WS(url);
+    const socket = new WS(url);
+    watchWs = socket;
+    watchState = null;
     watchWs.addEventListener("message", (ev) => {
+      if (watchWs !== socket) return;
       try {
         const m = JSON.parse(String(ev.data));
-        if (m.type === "state") aquaRecording = !!m.recording;
+        if (m.type === "state") observeWatchState(m);
       } catch { /* ignore */ }
     });
     watchWs.addEventListener("open", () => log(`linked aqua-watch :${WATCH_PORT}`));
     watchWs.addEventListener("close", () => {
+      if (watchWs !== socket) return;
       log("aqua-watch disconnected — retry in 3s");
       watchWs = null;
+      watchState = null;
+      for (const waiter of [...watchAdmissionWaiters]) waiter.accept();
       setTimeout(connectWatch, 3000);
     });
     watchWs.addEventListener("error", () => {
-      try { watchWs?.close(); } catch { /* */ }
+      try { socket.close(); } catch { /* */ }
     });
   } catch (e) {
     log("watch connect failed:", e.message);
@@ -297,6 +303,77 @@ let currentAuditRun = null;
 let controlRecovery = false;
 let nativeInputRecovery = false;
 let lastNativeMouseStatus = "";
+// Reuse the existing connection; this is an observation, not a provider lease API.
+let watchState = null;
+const watchAdmissionWaiters = new Set();
+function observeWatchState(value) {
+  if (value?.v !== 1 || value.type !== "state" || typeof value.recording !== "boolean" ||
+      typeof value.degraded !== "boolean" || !Number.isSafeInteger(value.seq) || value.seq < 0 ||
+      !Number.isSafeInteger(value.ts) || value.ts < 0 || value.ts > Date.now() ||
+      (watchState && (value.ts < watchState.ts || value.seq < watchState.seq))) {
+    watchState = null;
+    for (const waiter of [...watchAdmissionWaiters]) waiter.accept();
+    return;
+  }
+  aquaRecording = value.recording;
+  watchState = { recording: value.recording, degraded: value.degraded, seq: value.seq, ts: value.ts };
+  for (const waiter of [...watchAdmissionWaiters]) waiter.accept();
+}
+function startAdmission() {
+  if (DRY) return { ok: true };
+  if (aquaRecording === true || watchState?.recording === true) return { ok: false, reason: "provider_active" };
+  if (watchWs?.readyState !== 1 || !watchState || watchState.degraded !== false) {
+    return { ok: false, reason: "provider_state_unknown" };
+  }
+  return { ok: true };
+}
+function admissionStillFresh(startedMonoNs) {
+  const elapsed = process.hrtime.bigint() - startedMonoNs;
+  return elapsed >= 0n && elapsed <= 150_000_000n;
+}
+function requestFreshStartAdmission() {
+  const current = startAdmission();
+  if (DRY || !current.ok) return Promise.resolve(current);
+  const socket = watchWs;
+  const requestedAt = Date.now();
+  const requestedMonoNs = process.hrtime.bigint();
+  return new Promise((resolve) => {
+    let timer;
+    const finish = (result) => {
+      clearTimeout(timer);
+      watchAdmissionWaiters.delete(waiter);
+      resolve(result);
+    };
+    const waiter = { accept: () => {
+      if (!admissionStillFresh(requestedMonoNs)) return finish({ ok: false, reason: "provider_state_unknown" });
+      const admission = startAdmission();
+      if (watchWs !== socket || !admission.ok) return finish({ ok: false,
+        reason: watchWs === socket ? admission.reason : "provider_state_unknown" });
+      // No request IDs exist in Watch v1. A same-connection snapshot generated
+      // at/after this request is bounded observational freshness, not ownership.
+      if (watchState.ts >= requestedAt) finish({ ...admission, socket, requestedMonoNs });
+    } };
+    watchAdmissionWaiters.add(waiter);
+    // A deadline, not a retry/poll/sleep. Failure cannot authorize input.
+    timer = setTimeout(() => finish({ ok: false, reason: "provider_state_unknown" }), 150);
+    try { socket.send(JSON.stringify({ type: "get_state" })); }
+    catch { finish({ ok: false, reason: "provider_state_unknown" }); }
+  });
+}
+function rejectPendingStart(admission, context) {
+  // No Fn was sent. Cancel only local intent/proof, never release foreign input.
+  inputGeneration++;
+  pendingStartCapture = null;
+  cancelPasteGateRun();
+  shortClickInput.reset();
+  transcriptBaseline = null;
+  transcriptStartBaseline = null;
+  stopRequestedAt = null;
+  machine = reduce(machine, { type: "CANCEL" }).state;
+  currentAuditRun = null;
+  audit("suppressed", context, { status: "suppressed", reason: admission.reason });
+  return { ...admission, state: machine, actions: [] };
+}
 let autoEnterInFlight = false;
 let manualEnterInFlight = false;
 let manualEnterGeneration = null;
@@ -627,8 +704,7 @@ async function capturePasteFocus(generation, auditContext) {
   }
   if (!result?.ok) {
     if (auditContext) auditContext.captureFailure = sanitizeReasonCode(result?.reason) ?? "helper_unavailable";
-    if (auditContext?.route !== "back") reportFailure(result?.reason, auditContext);
-    log(`paste gate capture unavailable (${result?.reason ?? "unknown"}) — recording continues`);
+    log(`paste gate capture unavailable (${result?.reason ?? "unknown"}) — start admission pending`);
     cancelPasteGateRun(run);
     return null;
   }
@@ -649,13 +725,29 @@ async function runActions(actions) {
   for (const a of actions) {
     if (generation !== inputGeneration) return;
     switch (a) {
-      case "TOGGLE_START":
+      case "TOGGLE_START": {
         startControlAt = Date.now();
         stopRequestedAt = null;
         transcriptStartBaseline = DRY ? null : snapshotSignals({ includeAudio: false });
         transcriptBaseline = null;
         pasteRun = await capturePasteFocus(generation, auditContext);
         if (generation !== inputGeneration) return;
+        const pendingAdmission = { generation };
+        pendingStartCapture = pendingAdmission;
+        const admission = await requestFreshStartAdmission();
+        if (pendingStartCapture === pendingAdmission) pendingStartCapture = null;
+        if (generation !== inputGeneration) return;
+        if (!admission.ok) return rejectPendingStart(admission, auditContext);
+        // A newer frame may arrive after resolving the request but before this
+        // continuation. Do not reuse that earlier idle decision across await.
+        const latestAdmission = startAdmission();
+        if (!latestAdmission.ok) return rejectPendingStart(latestAdmission, auditContext);
+        if (!DRY && (watchWs !== admission.socket || !admissionStillFresh(admission.requestedMonoNs))) return rejectPendingStart({ ok: false,
+          reason: "provider_state_unknown" }, auditContext);
+        // Capture failure alone must not dispatch repair for a denied start.
+        if (auditContext?.captureFailure && auditContext.route !== "back") {
+          reportFailure(auditContext.captureFailure, auditContext);
+        }
         if (!DRY) transcriptStartBaseline = { ...transcriptStartBaseline,
           providerCompletionAnchor: snapshotSignals({ includeAudio: false, includeCompletionAnchor: true }).providerCompletionAnchor };
         log(a, `mode=${TOGGLE_MODE}`);
@@ -667,6 +759,7 @@ async function runActions(actions) {
           audit("fn_start", auditContext, { status: "posted", reason: "posted", durationMs: metrics.lastStartControlMs });
         }
         break;
+      }
       case "TOGGLE_STOP":
         stopRequestedAt = Date.now();
         if (!DRY) transcriptBaseline = snapshotSignals({ includeAudio: false, includeCompletionAnchor: true });
@@ -676,11 +769,27 @@ async function runActions(actions) {
         else await hid("fn-up");
         audit("fn_stop", auditContext, { status: "posted", reason: "posted", durationMs: Date.now() - stopRequestedAt });
         break;
-      case "PTT_DOWN":
+      case "PTT_DOWN": {
         transcriptStartBaseline = DRY ? null : snapshotSignals({ includeAudio: false });
         transcriptBaseline = null;
         pasteRun = await capturePasteFocus(generation, auditContext);
         if (generation !== inputGeneration) return;
+        const pendingAdmission = { generation };
+        pendingStartCapture = pendingAdmission;
+        const admission = await requestFreshStartAdmission();
+        if (pendingStartCapture === pendingAdmission) pendingStartCapture = null;
+        if (generation !== inputGeneration) return;
+        if (!admission.ok) return rejectPendingStart(admission, auditContext);
+        // A newer frame may arrive after resolving the request but before this
+        // continuation. Do not reuse that earlier idle decision across await.
+        const latestAdmission = startAdmission();
+        if (!latestAdmission.ok) return rejectPendingStart(latestAdmission, auditContext);
+        if (!DRY && (watchWs !== admission.socket || !admissionStillFresh(admission.requestedMonoNs))) return rejectPendingStart({ ok: false,
+          reason: "provider_state_unknown" }, auditContext);
+        // Capture failure alone must not dispatch repair for a denied start.
+        if (auditContext?.captureFailure && auditContext.route !== "back") {
+          reportFailure(auditContext.captureFailure, auditContext);
+        }
         if (!DRY) transcriptStartBaseline = { ...transcriptStartBaseline,
           providerCompletionAnchor: snapshotSignals({ includeAudio: false, includeCompletionAnchor: true }).providerCompletionAnchor };
         log(a);
@@ -688,6 +797,7 @@ async function runActions(actions) {
         await hid("fn-down");
         audit("fn_start", auditContext, { status: "posted", reason: "posted" });
         break;
+      }
       case "PTT_UP":
         stopRequestedAt = Date.now();
         if (!DRY) transcriptBaseline = snapshotSignals({ includeAudio: false, includeCompletionAnchor: true });
@@ -709,6 +819,7 @@ async function runActions(actions) {
           readSignals: () => snapshotSignals({ includeAudio: false }),
           baseline: transcriptBaseline ? { signals: transcriptBaseline } : undefined,
           recordingBaseline: transcriptStartBaseline,
+          requireProviderCompletion: true,
           signal: settleAbort.signal,
           maxWaitMs: Number(process.env.AQUA_SETTLE_TIMEOUT_MS ?? 45000),
           pollMs: 15,
@@ -764,6 +875,7 @@ async function runActions(actions) {
           const fresh = readFreshTranscription({
             baseline: transcriptBaseline,
             recordingBaseline: transcriptStartBaseline,
+          requireProviderCompletion: true,
           });
           if (!fresh.ok) {
             log(`paste gate expected text unavailable (${fresh.reason}) — skipping Enter`);
@@ -876,8 +988,7 @@ async function executeActions(actions) {
   const generation = inputGeneration;
   const context = currentAuditRun;
   try {
-    await runActions(actions);
-    return null;
+    return await runActions(actions) ?? null;
   } catch (error) {
     if (generation !== inputGeneration) return { ok: false, reason: "superseded", state: machine };
     const reason = error?.code === "native_input_unavailable" ? "native_input_unavailable" : "helper_error";
@@ -973,6 +1084,13 @@ async function handleEvent(type, { countInput = true, nativeRecovery = false, st
     }
   }
   const { state, actions } = reduce(machine, { type });
+  if (actions.includes("TOGGLE_START") || actions.includes("PTT_DOWN")) {
+    const admission = startAdmission();
+    if (!admission.ok) {
+      audit("suppressed", { route: routeFor(type) }, { status: "suppressed", reason: admission.reason });
+      return { ...admission, state: machine, actions: [] };
+    }
+  }
   machine = state;
   if (!actions.length) return { ok: true, state: machine, actions };
   if (actions.includes("TOGGLE_START") || actions.includes("PTT_DOWN")) {

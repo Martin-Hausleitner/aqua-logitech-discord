@@ -12,7 +12,7 @@ import { sanitizeAuditEvent, sanitizeReasonCode } from "./audit-log.mjs";
 import { VerifiedPasteGate } from "./verified-paste-gate.mjs";
 import { EventEmitter } from "node:events";
 
-const source = await readFile(join(dirname(fileURLToPath(import.meta.url)), "mouse-bridge.mjs"), "utf8");
+const source = await readFile(process.env.AQUA_TEST_CONTROLLER_SOURCE ?? join(dirname(fileURLToPath(import.meta.url)), "mouse-bridge.mjs"), "utf8");
 const nativeStatusCallback = source.match(/\n  onStatus: (\w+),/)?.[1];
 assert.ok(nativeStatusCallback, "evaluate the callback actually registered with native input");
 const controlsStart = source.indexOf("const AUTO_ENTER_APPS =");
@@ -28,6 +28,11 @@ const controllerSource = [
   source.slice(autoEnterStart, controlsEnd),
   `globalThis.__bridge = {
     handleEvent,
+    setWatch: (value) => {
+      watchMock.lastState = value;
+      aquaRecording = value?.recording ?? false;
+      if (typeof observeWatchState === "function") observeWatchState(value);
+    },
     requestManualEnter,
     requestInitialEnter,
     owner: () => ({ recordingId: currentAuditRun?.id, generation: inputGeneration }),
@@ -114,7 +119,10 @@ function makeHarness(overrides = {}) {
       close: async () => { nativeMouseCalls.push("close"); },
       status: () => ({ ready: true }),
     },
-    watchMock: { readyState: 1, send() {} },
+    watchMock: { readyState: 1, send(payload) {
+      if (JSON.parse(payload).type === "get_state") queueMicrotask(() =>
+        context.__bridge.setWatch({ ...this.lastState, ts: Date.now() }));
+    } },
     getActiveWindowMock: async () => ({ app: "Codex", title: "" }),
     hid: async (...args) => { hidCalls.push(args); },
     snapshotSignals: () => ({ wavMtime: 0, historyMtime: 0, historyTs: "" }),
@@ -138,6 +146,7 @@ function makeHarness(overrides = {}) {
     const verifiedPasteGate = pasteGateMock;
     ${controllerSource}
   `, context);
+  context.__bridge.setWatch(overrides.initialWatch ?? { v: 1, type: "state", seq: 1, ts: Date.now(), recording: false, degraded: false });
   return { bridge: context.__bridge, hidCalls, settleCalls, gateCalls, nativeMouseCalls, auditEvents, repairEvents };
 }
 
@@ -1539,4 +1548,253 @@ test('an explicit cancel still hard-invalidates a confirmed initial sender', asy
   assert.equal(calls.filter(({ op }) => op === 'cancel').length, 1);
   assert.equal(calls.some(({ op }) => op === 'releaseConsumed'), false);
   assert.equal(bridge.metrics().initialEnterCount, 1);
+});
+
+// Offline ownership regression: evaluate the actual controller with mocked I/O.
+for (const type of ["BUTTON_SEND_TAP", "BUTTON_DICTATE_TAP", "BUTTON1_TAP", "BUTTON2_DOWN"]) {
+  test(`admission: observed active provider rejects idle ${type} without any control or capture`, async () => {
+    const h = makeHarness();
+    h.bridge.setWatch({ v: 1, type: "state", seq: 2, ts: Date.now(), recording: true, degraded: false });
+    const result = await h.bridge.handleEvent(type);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "provider_active");
+    assert.equal(h.bridge.state().mode, "idle");
+    assert.equal(h.hidCalls.length, 0);
+    assert.equal(h.gateCalls.length, 0);
+    assert.equal(h.repairEvents.length, 0);
+  });
+}
+for (const status of [null, { v: 1, type: "state", seq: 2, ts: Date.now(), recording: false, degraded: true }]) {
+  test(`admission: ${status ? "degraded" : "missing"} watch observation rejects physical down/up`, async () => {
+    const h = makeHarness();
+    h.bridge.setWatch(status);
+    await h.bridge.shortClickInput.down("front", "1000000");
+    await h.bridge.shortClickInput.up("front", "2000000");
+    assert.equal(h.bridge.state().mode, "idle");
+    assert.equal(h.hidCalls.length, 0);
+    assert.equal(h.gateCalls.length, 0);
+    assert.equal(h.bridge.metrics().initialEnterAttempts, 0);
+  });
+}
+for (const kind of ["active", "unknown"]) {
+  test(`admission: ${kind} status arriving during asynchronous capture blocks Fn and initial Enter`, async () => {
+    const capture = deferred();
+    const calls = [];
+    const h = makeHarness({ pasteGate: {
+      capture: async () => { calls.push("capture"); return capture.promise; },
+      cancel: () => calls.push("cancel"),
+      initialEnterAndRebase: async () => { calls.push("initialEnter"); return { ok: true, posted: true, rebaseReady: true }; },
+    } });
+    const down = h.bridge.shortClickInput.down("front", "1000000");
+    const up = h.bridge.shortClickInput.up("front", "2000000");
+    h.bridge.setWatch(kind === "active"
+      ? { v: 1, type: "state", seq: 2, ts: Date.now(), recording: true, degraded: false } : null);
+    capture.resolve({ ok: true });
+    await down; await up;
+    assert.equal(h.bridge.state().mode, "idle");
+    assert.equal(h.hidCalls.length, 0, "no down, emergency release, or foreign stop");
+    assert.deepEqual(calls, ["capture", "cancel"]);
+    assert.equal(h.repairEvents.length, 0);
+    assert.equal(h.bridge.metrics().initialEnterAttempts, 0);
+  });
+}
+test("admission: own stop and processing request remain usable while provider is recording", async () => {
+  const h = makeHarness();
+  await h.bridge.handleEvent("BUTTON_SEND_TAP");
+  h.bridge.setWatch({ v: 1, type: "state", seq: 2, ts: Date.now(), recording: true, degraded: false });
+  const stopped = h.bridge.handleEvent("BUTTON_SEND_TAP");
+  await waitFor(() => h.settleCalls.length === 1);
+  const processing = await h.bridge.requestManualEnter("front");
+  assert.equal(processing.reason, "awaiting_transcript");
+  assert.deepEqual(h.hidCalls, [["fn-down"], ["fn-up"]]);
+  h.settleCalls[0].gate.resolve({ ok: true, reason: "history_ts", waitedMs: 1 });
+  await stopped;
+  assert.equal(h.bridge.state().mode, "idle");
+  assert.equal(h.bridge.metrics().autoEnterCount, 1);
+});
+
+for (const response of ["missing", "stale", "active", "degraded"]) {
+  test(`admission freshness: ${response} reply cannot authorize input after capture`, async () => {
+    let deadline;
+    const requests = [];
+    const socket = { readyState: 1, send: (payload) => requests.push(JSON.parse(payload)) };
+    const h = makeHarness({ watchMock: socket,
+      initialWatch: { v: 1, type: "state", seq: 1, ts: 0, recording: false, degraded: false },
+      setTimeout: (fn) => { deadline = fn; return 1; }, clearTimeout: () => {} });
+    const down = h.bridge.shortClickInput.down("front", "1000000");
+    const up = h.bridge.shortClickInput.up("front", "2000000");
+    await waitFor(() => requests.length === 1);
+    assert.equal(h.hidCalls.length, 0);
+    if (response !== "missing") h.bridge.setWatch({ v: 1, type: "state", seq: 2,
+      ts: response === "stale" ? 0 : Date.now(), recording: response === "active", degraded: response === "degraded" });
+    deadline();
+    await down; await up;
+    assert.equal(h.bridge.state().mode, "idle");
+    assert.equal(h.hidCalls.length, 0);
+    assert.equal(h.bridge.metrics().initialEnterAttempts, 0);
+    assert.deepEqual(requests, [{ type: "get_state" }]);
+    assert.equal(h.repairEvents.length, 0);
+  });
+}
+test("admission freshness: a current idle reply authorizes one start after capture", async () => {
+  const requests = [];
+  const socket = { readyState: 1, send: (payload) => requests.push(JSON.parse(payload)) };
+  const h = makeHarness({ watchMock: socket,
+    initialWatch: { v: 1, type: "state", seq: 1, ts: 0, recording: false, degraded: false } });
+  const started = h.bridge.handleEvent("BUTTON2_DOWN");
+  await waitFor(() => requests.length === 1);
+  assert.equal(h.hidCalls.length, 0);
+  assert.equal(h.gateCalls.filter(({ op }) => op === "capture").length, 1);
+  h.bridge.setWatch({ v: 1, type: "state", seq: 1, ts: Date.now(), recording: false, degraded: false });
+  await started;
+  assert.deepEqual(h.hidCalls, [["fn-down"]]);
+  assert.equal(h.bridge.state().mode, "ptt_holding");
+  assert.equal(requests.filter(({ type }) => type === "get_state").length, 1);
+});
+test("admission freshness: release while awaiting status invalidates start before a late idle reply", async () => {
+  const requests = [];
+  const socket = { readyState: 1, send: (payload) => requests.push(JSON.parse(payload)) };
+  const h = makeHarness({ watchMock: socket });
+  const started = h.bridge.shortClickInput.down("front", "1000000");
+  await waitFor(() => requests.length === 1);
+  const release = await h.bridge.shortClickInput.up("front", "400000000");
+  assert.equal(release.reason, "capture_cancelled");
+  h.bridge.setWatch({ v: 1, type: "state", seq: 1, ts: Date.now(), recording: false, degraded: false });
+  await started;
+  assert.equal(h.bridge.state().mode, "idle");
+  assert.equal(h.hidCalls.length, 0);
+  assert.equal(h.bridge.metrics().initialEnterAttempts, 0);
+});
+
+for (const nextState of ["active", "degraded", "missing"]) {
+  test(`admission freshness: ${nextState} frame after idle resolution wins before Fn continuation`, async () => {
+    const requests = [];
+    const socket = { readyState: 1, send: (payload) => requests.push(JSON.parse(payload)) };
+    const h = makeHarness({ watchMock: socket });
+    const started = h.bridge.shortClickInput.down("front", "1000000");
+    const released = h.bridge.shortClickInput.up("front", "2000000");
+    await waitFor(() => requests.length === 1);
+    h.bridge.setWatch({ v: 1, type: "state", seq: 1, ts: Date.now(), recording: false, degraded: false });
+    h.bridge.setWatch(nextState === "missing" ? null : { v: 1, type: "state", seq: 2,
+      ts: Date.now(), recording: nextState === "active", degraded: nextState === "degraded" });
+    await started; await released;
+    assert.equal(h.bridge.state().mode, "idle");
+    assert.equal(h.hidCalls.length, 0);
+    assert.equal(h.bridge.metrics().initialEnterAttempts, 0);
+  });
+}
+
+for (const point of ["before_reply", "after_reply_before_continuation"]) {
+  test(`admission freshness: delayed event loop at ${point} cannot outlive the 150ms budget`, async () => {
+    let mono = 0n;
+    const requests = [];
+    const socket = { readyState: 1, send: (payload) => requests.push(JSON.parse(payload)) };
+    const h = makeHarness({ watchMock: socket, process: { env: {}, hrtime: { bigint: () => mono } } });
+    const started = h.bridge.handleEvent("BUTTON_SEND_TAP");
+    await waitFor(() => requests.length === 1);
+    if (point === "before_reply") mono = 151_000_000n;
+    h.bridge.setWatch({ v: 1, type: "state", seq: 1, ts: Date.now(), recording: false, degraded: false });
+    if (point === "after_reply_before_continuation") mono = 151_000_000n;
+    await started;
+    assert.equal(h.bridge.state().mode, "idle");
+    assert.equal(h.hidCalls.length, 0);
+  });
+}
+
+function deferredCaptureFailureHarness() {
+  const capture = deferred();
+  const effects = [];
+  const requests = [];
+  let deadline;
+  const hid = async (command) => effects.push(command);
+  hid.emergencyRelease = async () => effects.push("emergencyRelease");
+  const h = makeHarness({ hid,
+    watchMock: { readyState: 1, send: (payload) => requests.push(JSON.parse(payload)) },
+    setTimeout: (callback) => { deadline = callback; return 1; }, clearTimeout: () => {},
+    pasteGate: {
+      capture: () => capture.promise,
+      cancel: () => effects.push("cancel"),
+      close: async () => effects.push("paste.close"),
+      initialEnterAndRebase: async () => { effects.push("initialEnter"); return { ok: true, posted: true, rebaseReady: true }; },
+    },
+  });
+  return { ...h, capture, effects, requests, expire: () => deadline() };
+}
+function startCaptureFailureCase(h, route) {
+  if (route === "front" || route === "back") {
+    const started = h.bridge.shortClickInput.down(route, "1000000");
+    const released = h.bridge.shortClickInput.up(route, "2000000");
+    return { started, released };
+  }
+  return { started: h.bridge.handleEvent(route === "legacy_ptt" ? "BUTTON2_DOWN" : "BUTTON1_TAP"), released: Promise.resolve() };
+}
+function finishFailedCapture(h, failure) {
+  if (failure === "throw") h.capture.reject(new Error("synthetic capture exception"));
+  else h.capture.resolve({ ok: false, reason: "not_editable" });
+}
+
+for (const route of ["front", "legacy_toggle", "legacy_ptt"]) {
+  for (const status of ["active", "unknown", "timeout"]) {
+    for (const failure of ["not_editable", "throw"]) {
+      test(`capture repair admission: ${route} ${failure} plus ${status} rejects without repair or native effects`, async () => {
+        const h = deferredCaptureFailureHarness();
+        const { started, released } = startCaptureFailureCase(h, route);
+        if (status === "active") h.bridge.setWatch({ v: 1, type: "state", seq: 2, ts: Date.now(), recording: true, degraded: false });
+        if (status === "unknown") h.bridge.setWatch(null);
+        finishFailedCapture(h, failure);
+        if (status === "timeout") {
+          await waitFor(() => h.requests.some(({ type }) => type === "get_state"));
+          h.expire();
+        }
+        const result = await started;
+        await released;
+        assert.equal(result.ok, false);
+        assert.equal(result.reason, status === "active" ? "provider_active" : "provider_state_unknown");
+        assert.equal(h.bridge.state().mode, "idle");
+        assert.deepEqual(h.repairEvents, [], "a rejected start must not dispatch a capture repair");
+        assert.deepEqual(h.nativeMouseCalls, [], "no native close on admission denial");
+        assert.deepEqual(h.effects, ["cancel"], "only local proof cancellation, never Fn, emergency release, close or Initial Enter");
+        assert.equal(h.bridge.metrics().initialEnterAttempts, 0);
+        assert.equal(h.auditEvents.filter(({ eventType, status }) => eventType === "capture" && status === "failed").length, 1);
+      });
+    }
+  }
+}
+for (const route of ["front", "legacy_toggle", "legacy_ptt", "back"]) {
+  for (const failure of ["not_editable", "throw"]) {
+    test(`capture repair admission: allowed ${route} start keeps existing ${failure} reporting policy`, async () => {
+      const h = deferredCaptureFailureHarness();
+      const { started, released } = startCaptureFailureCase(h, route);
+      finishFailedCapture(h, failure);
+      await waitFor(() => h.requests.some(({ type }) => type === "get_state"));
+      h.bridge.setWatch({ v: 1, type: "state", seq: 1, ts: Date.now(), recording: false, degraded: false });
+      const result = await started;
+      await released;
+      assert.equal(result.ok, true);
+      assert.deepEqual(h.effects, ["cancel", "fn-down"]);
+      assert.deepEqual(h.nativeMouseCalls, []);
+      assert.equal(h.bridge.metrics().initialEnterAttempts, 0);
+      assert.equal(h.repairEvents.length, route === "back" ? 0 : 1);
+      if (route !== "back") assert.equal(h.repairEvents[0].reason, failure === "throw" ? "helper_unavailable" : "not_editable");
+    });
+  }
+}
+test("provider wiring: real controller requires provider completion in both settle and final text reader", async () => {
+  const textReads = [];
+  const h = makeHarness({ readFreshTranscription: (options) => {
+    textReads.push(options);
+    return { ok: true, text: "synthetic owned transcript" };
+  } });
+  await h.bridge.handleEvent("BUTTON_SEND_TAP");
+  const stopped = h.bridge.handleEvent("BUTTON_SEND_TAP");
+  await waitFor(() => h.settleCalls.length === 1);
+  assert.equal(h.settleCalls[0].options.requireProviderCompletion, true);
+  h.settleCalls[0].gate.resolve({ ok: true, reason: "history_ts", waitedMs: 1 });
+  await stopped;
+  assert.equal(textReads.length, 1);
+  assert.equal(textReads[0].requireProviderCompletion, true);
+  assert.equal(textReads[0].baseline, h.settleCalls[0].options.baseline.signals);
+  assert.equal(textReads[0].recordingBaseline, h.settleCalls[0].options.recordingBaseline);
+  assert.equal(h.bridge.metrics().autoEnterCount, 1);
+  assert.equal(h.bridge.state().mode, "idle");
 });
