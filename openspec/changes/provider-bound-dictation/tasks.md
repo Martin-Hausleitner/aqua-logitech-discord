@@ -9,7 +9,7 @@
 - [x] 2.2 Verify denied capture failures cause no input or repair, including active, unknown and timed out status; retain the allowed-start control case. Evidence: `bridge-concurrency.test.mjs` capture/admission regressions passed in the complete package suite.
 - [x] 2.3 Verify normal front/back stops, processing follow-ups, generation cancellation, strict production wiring and the empty-result contract with synthetic tests. Evidence: concurrency, short-click, state-machine, provider-ownership, settle and empty-completion suites passed; the wiring test checks both production callers.
 - [x] 2.4 Run the relevant package tests, strict specification validation and publication scope/privacy checks. Evidence: the full public package test list ran serially, 431 passed with zero failures/skips; strict validation and scoped diff checks passed. Tests include mocks and a private DRY-only loopback fixture, not productive Aqua acceptance.
-- [ ] 2.5 Publish and independently read back the new draft PR head, clearly distinguishing offline proof from runtime acceptance.
+- [x] 2.5 Publish and independently read back the new draft PR head, clearly distinguishing offline proof from runtime acceptance. Evidence: code commit `0f715fc` was pushed and the GitHub API returned the identical draft PR head. Runtime acceptance below remains open.
 
 ## 3. Deferred runtime acceptance
 
