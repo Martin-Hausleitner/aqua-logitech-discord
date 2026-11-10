@@ -114,7 +114,9 @@ private func expectedValue(from snapshot: AXSnapshot, insertedText: String) -> S
 }
 
 private func frontmostPid() -> pid_t? {
-    NSWorkspace.shared.frontmostApplication?.processIdentifier
+    // Service workspace notifications in this synchronous stdin-driven helper.
+    _ = CFRunLoopRunInMode(CFRunLoopMode.defaultMode, 0.001, true)
+    return NSWorkspace.shared.frontmostApplication?.processIdentifier
 }
 
 private func focusedElement(in application: AXUIElement, pid: pid_t) -> (element: AXUIElement?, reason: String) {
