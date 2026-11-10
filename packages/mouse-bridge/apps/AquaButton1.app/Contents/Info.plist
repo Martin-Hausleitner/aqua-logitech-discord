@@ -5,4 +5,5 @@
   <key>CFBundleIdentifier</key><string>org.aqua.AquaButton1</string>
   <key>CFBundleName</key><string>AquaButton1</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>LSUIElement</key><true/>
 </dict></plist>
