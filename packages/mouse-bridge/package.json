@@ -3,13 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Logitech G Pro side-button → Aqua Voice + post-transcription Enter",
+  "description": "Native Logitech side-button input for Aqua Voice with verified post-transcription Return",
   "scripts": {
     "start": "node src/mouse-bridge.mjs",
-    "test": "node --test src/state-machine.test.mjs src/settle.test.mjs src/mouse-bridge.test.mjs src/hid-semantic-decoder.test.mjs src/decode-capture.test.mjs src/key-hint.test.mjs",
-    "capture-receiver": "./scripts/capture-receiver.sh"
+    "test": "node --test src/short-click-input.test.mjs src/state-machine.test.mjs src/settle.test.mjs src/mouse-bridge.test.mjs src/hid-semantic-decoder.test.mjs src/decode-capture.test.mjs src/key-hint.test.mjs src/bridge-concurrency.test.mjs src/verified-paste-gate.test.mjs src/paste-gate-process.integration.test.mjs src/native-mouse-input.test.mjs src/aqua-control.test.mjs src/audit-log.test.mjs src/repair-notifier.test.mjs src/repair-dispatcher.test.mjs src/repair-runner.test.mjs tools/aqua-live-monitor.test.mjs src/initial-enter-client.test.mjs src/initial-enter-native.test.mjs src/frontmost-pid-native.test.mjs src/provider-empty-completion.test.mjs src/provider-ownership.test.mjs",
+    "capture-receiver": "./scripts/capture-receiver.sh",
+    "build:verified-paste-gate": "./scripts/build-verified-paste-gate.sh",
+    "build:native-mouse-input": "./scripts/build-native-mouse-input.sh",
+    "monitor": "node tools/aqua-live-monitor.mjs --port 0 --page \"$PWD/tools/aqua-live-test.html\""
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }
