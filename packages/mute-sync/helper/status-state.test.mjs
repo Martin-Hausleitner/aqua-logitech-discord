@@ -16,7 +16,7 @@ test("initial snapshot reports Discord as offline and unknown", () => {
         intent: null,
         confirmation: null,
         apps: {
-            discord: { muted: null, online: false, seq: 0, ts: 0 }
+            discord: { muted: null, autoSync: null, online: false, seq: 0, ts: 0 }
         }
     });
 });
@@ -39,6 +39,31 @@ test("newer Discord reports win and stale client sequences are ignored", () => {
     assert.equal(snapshot.apps.discord.seq, 1);
 });
 
+test("set_auto_sync is additive, monotonic, and reflected in state", () => {
+    const state = new StatusState({ now: () => 1000 });
+    const client = Symbol("discord");
+    assert.equal(state.reportAutoSync(client, { v: 1, type: "set_auto_sync", app: "discord", enabled: false, clientSeq: 4 }), true);
+    assert.equal(state.snapshot().apps.discord.autoSync, false);
+    assert.equal(state.reportAutoSync(client, { v: 1, type: "set_auto_sync", app: "discord", enabled: true, clientSeq: 4 }), false);
+    assert.equal(state.snapshot().apps.discord.autoSync, false);
+    assert.equal(state.reportAutoSync(client, { v: 1, type: "set_auto_sync", app: "discord", enabled: true, clientSeq: 5 }), true);
+    assert.equal(state.snapshot().apps.discord.autoSync, true);
+});
+
+test("set_auto_sync rejects invalid payloads and competing producers", () => {
+    const state = new StatusState();
+    const first = Symbol("first");
+    const second = Symbol("second");
+    for (const message of [
+        { app: "other", enabled: true, clientSeq: 0 },
+        { app: "discord", enabled: 1, clientSeq: 1 },
+        { app: "discord", enabled: true, clientSeq: -1 },
+        { app: "discord", enabled: true, clientSeq: 1.5 }
+    ]) assert.equal(state.reportAutoSync(first, message), false);
+    assert.equal(state.reportAutoSync(first, { app: "discord", enabled: true, clientSeq: 0 }), true);
+    assert.equal(state.reportAutoSync(second, { app: "discord", enabled: false, clientSeq: 0 }), false);
+});
+
 test("disconnect replaces the last producer state with honest unknown", () => {
     const state = new StatusState({ now: () => 1000 });
     const client = Symbol("discord");
@@ -47,6 +72,7 @@ test("disconnect replaces the last producer state with honest unknown", () => {
     assert.equal(state.disconnect(client), true);
     assert.deepEqual(state.snapshot().apps.discord, {
         muted: null,
+        autoSync: null,
         online: false,
         seq: 2,
         ts: 1000
